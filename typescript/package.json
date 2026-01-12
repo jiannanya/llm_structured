@@ -1,0 +1,20 @@
+{
+  "name": "llm-structured-native-demo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build:native": "node-gyp rebuild",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:native && npm run build:ts",
+    "test:demo": "node dist/examples/demo.js",
+    "test:unit": "node dist/test/test.js",
+    "test": "npm run build && npm run test:unit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

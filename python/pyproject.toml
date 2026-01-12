@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=69", "wheel", "pybind11>=2.11"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-structured"
+version = "0.0.0"
+description = "C++17-backed structured output parsing/validation"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["llm_structured"]
