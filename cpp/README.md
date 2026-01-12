@@ -2,6 +2,8 @@
 
 This folder (`cpp/`) contains the C++17 core implementation (standard-library only). The Python and TypeScript packages build on top of the same core logic to keep behavior consistent across languages.
 
+If you only want to use the native library (or embed it into another project), this folder is the source of truth.
+
 ## What’s included
 
 - JSON-ish extraction, controlled repair, parsing
@@ -14,13 +16,18 @@ This folder (`cpp/`) contains the C++17 core implementation (standard-library on
 
 ## Build and test (CMake)
 
-From the `test5/test1` folder:
+From the repository root:
 
 ```powershell
-cmake -S cpp -B build/llm_structured_cpp
-cmake --build build/llm_structured_cpp -j
-ctest --test-dir build/llm_structured_cpp -V
+cmake -S cpp -B cpp/build
+cmake --build cpp/build -j
+ctest --test-dir cpp/build -C Debug -V
 ```
+
+Notes:
+
+- On Windows with Visual Studio generators, pass `-C Debug` (or `-C Release`) to `ctest`.
+- If you move the repo folder after configuring, delete `cpp/build/` and re-run `cmake -S ... -B ...`.
 
 Artifacts:
 
@@ -64,6 +71,54 @@ auto r = llm_structured::loads_jsonish_ex("```json\n{\"a\":1,}\n```", repair);
 // r.value / r.fixed / r.metadata
 ```
 
+Duplicate keys inside JSON objects are handled via `repair.duplicate_key_policy`:
+
+- `FirstWins` (default)
+- `LastWins`
+- `Error` (throws a `ValidationError` with path like `$.a`)
+
+### Parse *all* JSON blocks from one input
+
+If the input contains multiple JSON payloads (multiple fences and/or multiple inline `{...}` / `[...]`), use the `*_all*` APIs.
+
+- Candidates/values are returned in source order.
+- Validation errors are rooted at `$[i]` to indicate which block failed.
+
+```cpp
+#include <cassert>
+#include <string>
+
+#include "llm_structured.hpp"
+
+int main() {
+  const std::string fence_open = std::string("`") + "``json\n";
+  const std::string fence_close = std::string("`") + "``\n";
+
+  const std::string text =
+      "prefix\n" +
+      fence_open + "{\"a\": 1}\n" + fence_close +
+      "middle {\"b\": 2} tail\n" +
+      fence_open + "[1, 2]\n" + fence_close;
+
+  auto candidates = llm_structured::extract_json_candidates(text);
+  assert(candidates.size() == 3);
+
+  auto values = llm_structured::loads_jsonish_all(text);
+  assert(values.size() == 3);
+
+  llm_structured::Json schema = llm_structured::loads_jsonish(R"JSON(
+{"type":"object","required":["a"],"properties":{"a":{"type":"integer"}}}
+)JSON");
+
+  try {
+    (void)llm_structured::parse_and_validate_all("{\"a\":\"x\"} {\"a\":2}", schema);
+  } catch (const llm_structured::ValidationError& e) {
+    // e.path is like $[0].a
+    (void)e;
+  }
+}
+```
+
 ### Streaming parse (`JsonStreamParser`)
 
 ```cpp
@@ -76,6 +131,14 @@ p.finish();
 auto out = p.poll();
 ```
 
+There are also emit-all streaming collectors:
+
+- `JsonStreamCollector` (collect all parsed values)
+- `JsonStreamBatchCollector` (emit batches)
+- `JsonStreamValidatedBatchCollector` (validate + apply defaults per item)
+
+See the root README for a higher-level overview.
+
 ## CLI
 
 ### JSON
@@ -83,6 +146,11 @@ auto out = p.poll();
 ```powershell
 echo '```json\n{"a":1,}\n```' | build/llm_structured_cpp/llm_structured_cli json
 ```
+
+If you built into `cpp/build/`, the binary path is typically:
+
+- `cpp/build/Debug/llm_structured_cli.exe` (MSVC Debug)
+- `cpp/build/Release/llm_structured_cli.exe` (MSVC Release)
 
 With a schema:
 
