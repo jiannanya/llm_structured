@@ -14,6 +14,15 @@ import {
   validateAllJsonValue,
   validateWithRepair,
   parseAndRepair,
+  buildOpenaiFunctionTool,
+  buildAnthropicTool,
+  buildGeminiFunctionDeclaration,
+  parseOpenaiToolCall,
+  parseAnthropicToolUse,
+  parseGeminiFunctionCall,
+  parseOpenaiToolCallsFromResponse,
+  parseAnthropicToolUsesFromResponse,
+  parseGeminiFunctionCallsFromResponse,
   parseAndValidateKv,
   parseAndValidateMarkdown,
   parseAndValidateSql,
@@ -317,6 +326,92 @@ function testXmlHtmlApis(): void {
   assert.ok(htmlOut.includes("<b>world</b>"));
 }
 
+function testToolCalling(): void {
+  const schema: JsonSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["id"],
+    properties: { id: { type: "integer" } },
+  };
+
+  const openai = buildOpenaiFunctionTool("get_user", "Get a user", schema);
+  assert.equal((openai.tool as any).type, "function");
+  assert.equal((openai.tool as any).function.name, "get_user");
+
+  const anthropic = buildAnthropicTool("get_user", "Get a user", schema);
+  assert.equal((anthropic.tool as any).name, "get_user");
+  assert.ok((anthropic.tool as any).input_schema);
+
+  const gemini = buildGeminiFunctionDeclaration("get_user", "Get a user", schema);
+  assert.equal((gemini.tool as any).name, "get_user");
+  assert.ok((gemini.tool as any).parameters);
+
+  const toolCall = {
+    id: "call_1",
+    type: "function",
+    function: { name: "get_user", arguments: "{'id': '123',}" },
+  };
+  const r1 = parseOpenaiToolCall(
+    toolCall,
+    schema,
+    { coerceTypes: true },
+    { allowSingleQuotes: true, dropTrailingCommas: true }
+  );
+  assert.equal(r1.platform, "openai");
+  assert.equal(r1.name, "get_user");
+  assert.equal(r1.ok, true);
+  assert.deepEqual(r1.validation.repairedValue, { id: 123 });
+
+  const toolUse = { type: "tool_use", id: "tu_1", name: "get_user", input: { id: "123", extra: 1 } };
+  const r2 = parseAnthropicToolUse(toolUse, schema, { coerceTypes: true, removeExtraProperties: true });
+  assert.equal(r2.platform, "anthropic");
+  assert.equal(r2.ok, true);
+  assert.deepEqual(r2.validation.repairedValue, { id: 123 });
+
+  const functionCall = { name: "get_user", args: { id: "123" } };
+  const r3 = parseGeminiFunctionCall(functionCall, schema, { coerceTypes: true });
+  assert.equal(r3.platform, "gemini");
+  assert.equal(r3.ok, true);
+  assert.deepEqual(r3.validation.repairedValue, { id: 123 });
+
+  const schemas = { get_user: schema };
+  const openaiResp = { choices: [{ message: { tool_calls: [toolCall] } }] };
+  const calls = parseOpenaiToolCallsFromResponse(openaiResp as any, schemas, { coerceTypes: true }, { allowSingleQuotes: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].ok, true);
+
+  const anthropicResp = {
+    content: [
+      { type: "text", text: "hi" },
+      { type: "tool_use", id: "tu_1", name: "get_user", input: { id: "2" } },
+    ],
+  };
+  const uses = parseAnthropicToolUsesFromResponse(anthropicResp as any, schemas, { coerceTypes: true });
+  assert.equal(uses.length, 1);
+  assert.equal(uses[0].ok, true);
+
+  const geminiResp = {
+    candidates: [
+      {
+        content: {
+          parts: [{ functionCall: { name: "get_user", args: { id: "3" } } }],
+        },
+      },
+    ],
+  };
+  const fcs = parseGeminiFunctionCallsFromResponse(geminiResp as any, schemas, { coerceTypes: true });
+  assert.equal(fcs.length, 1);
+  assert.equal(fcs[0].ok, true);
+
+  const unknown = parseOpenaiToolCallsFromResponse(
+    { tool_calls: [{ id: "call_x", type: "function", function: { name: "nope", arguments: "{}" } }] } as any,
+    schemas
+  );
+  assert.equal(unknown.length, 1);
+  assert.equal(unknown[0].ok, false);
+  assert.ok(unknown[0].error.includes("unknown tool schema"));
+}
+
 function testKvAndMarkdown(): void {
   const kvSchema: KeyValueSchema = {
     required: ["A"],
@@ -439,6 +534,7 @@ function main(): void {
   testValidateAllJsonValuePointers();
   testValidateWithRepairApis();
   testXmlHtmlApis();
+  testToolCalling();
   testKvAndMarkdown();
   testSqlStreamingAndLimits();
   testStreamingFinishAndLocation();

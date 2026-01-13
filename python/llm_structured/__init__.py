@@ -423,6 +423,108 @@ def parse_and_repair(
     return dict(_native.parse_and_repair(text, schema, config, parse_repair))
 
 
+# ============== Function Calling / Tool Use ==============
+
+def build_openai_function_tool(
+    name: str,
+    description: str = "",
+    parameters_schema: Schema | str | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build an OpenAI tool definition: {type:'function', function:{name, description?, parameters}}."""
+    if parameters_schema is None:
+        parameters_schema = {}
+    return dict(_native.build_openai_function_tool(name, description, parameters_schema, config))
+
+
+def build_anthropic_tool(
+    name: str,
+    description: str = "",
+    input_schema: Schema | str | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build an Anthropic tool definition: {name, description?, input_schema}."""
+    if input_schema is None:
+        input_schema = {}
+    return dict(_native.build_anthropic_tool(name, description, input_schema, config))
+
+
+def build_gemini_function_declaration(
+    name: str,
+    description: str = "",
+    parameters_schema: Schema | str | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Build a Gemini function declaration: {name, description?, parameters} (Gemini schema shape)."""
+    if parameters_schema is None:
+        parameters_schema = {}
+    return dict(_native.build_gemini_function_declaration(name, description, parameters_schema, config))
+
+
+def parse_openai_tool_call(
+    tool_call: Json,
+    parameters_schema: Schema | str,
+    validation_repair: Mapping[str, Any] | None = None,
+    parse_repair: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Parse/validate one OpenAI tool call object (from tool_calls[])."""
+    return dict(_native.parse_openai_tool_call(tool_call, parameters_schema, validation_repair, parse_repair))
+
+
+def parse_anthropic_tool_use(
+    tool_use: Json,
+    input_schema: Schema | str,
+    validation_repair: Mapping[str, Any] | None = None,
+    parse_repair: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Parse/validate one Anthropic tool_use content block."""
+    return dict(_native.parse_anthropic_tool_use(tool_use, input_schema, validation_repair, parse_repair))
+
+
+def parse_gemini_function_call(
+    function_call: Json,
+    parameters_schema: Schema | str,
+    validation_repair: Mapping[str, Any] | None = None,
+    parse_repair: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Parse/validate one Gemini functionCall object."""
+    return dict(_native.parse_gemini_function_call(function_call, parameters_schema, validation_repair, parse_repair))
+
+
+def parse_openai_tool_calls_from_response(
+    response: Json,
+    schemas_by_name: Mapping[str, Schema | str],
+    validation_repair: Mapping[str, Any] | None = None,
+    parse_repair: Mapping[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    """Extract and parse all tool calls from an OpenAI response envelope."""
+    return list(_native.parse_openai_tool_calls_from_response(response, dict(schemas_by_name), validation_repair, parse_repair))
+
+
+def parse_anthropic_tool_uses_from_response(
+    response: Json,
+    schemas_by_name: Mapping[str, Schema | str],
+    validation_repair: Mapping[str, Any] | None = None,
+    parse_repair: Mapping[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    """Extract and parse all tool_use blocks from an Anthropic response envelope."""
+    return list(
+        _native.parse_anthropic_tool_uses_from_response(response, dict(schemas_by_name), validation_repair, parse_repair)
+    )
+
+
+def parse_gemini_function_calls_from_response(
+    response: Json,
+    schemas_by_name: Mapping[str, Schema | str],
+    validation_repair: Mapping[str, Any] | None = None,
+    parse_repair: Mapping[str, Any] | None = None,
+) -> List[Dict[str, Any]]:
+    """Extract and parse all functionCall parts from a Gemini response envelope."""
+    return list(
+        _native.parse_gemini_function_calls_from_response(response, dict(schemas_by_name), validation_repair, parse_repair)
+    )
+
+
 
 __all__ = [
     "Json",
@@ -493,6 +595,15 @@ __all__ = [
     "merge_schemas",
     "validate_with_repair",
     "parse_and_repair",
+    "build_openai_function_tool",
+    "build_anthropic_tool",
+    "build_gemini_function_declaration",
+    "parse_openai_tool_call",
+    "parse_anthropic_tool_use",
+    "parse_gemini_function_call",
+    "parse_openai_tool_calls_from_response",
+    "parse_anthropic_tool_uses_from_response",
+    "parse_gemini_function_calls_from_response",
     "JsonStreamParser",
     "JsonStreamCollector",
     "JsonStreamBatchCollector",

@@ -2238,6 +2238,512 @@ ValidationRepairResult parse_and_repair(const std::string& text,
   return validate_with_repair(parsed.value, schema, config);
 }
 
+// ---------------- Function Calling / Tool Use ----------------
+
+namespace {
+
+static bool is_object_schema(const Json& schema) {
+  if (!schema.is_object()) return false;
+  const auto& o = schema.as_object();
+  auto it = o.find("type");
+  if (it != o.end() && it->second.is_string()) {
+    return to_lower(it->second.as_string()) == "object";
+  }
+  // Heuristic: properties implies object.
+  return o.find("properties") != o.end();
+}
+
+static Json normalize_tool_parameters_schema(const Json& schema, const ToolSchemaConfig& config, std::vector<std::string>& warnings) {
+  Json out = schema;
+
+  if (config.wrap_non_object && !is_object_schema(out)) {
+    JsonObject props;
+    props["value"] = out;
+
+    JsonObject wrapper;
+    wrapper["type"] = Json("object");
+    wrapper["properties"] = Json(std::move(props));
+    JsonArray req;
+    req.emplace_back(Json("value"));
+    wrapper["required"] = Json(std::move(req));
+    if (config.strict_additional_properties) {
+      wrapper["additionalProperties"] = Json(false);
+    }
+    warnings.push_back("wrapped non-object schema as {type:object, properties:{value:...}, required:[value]}");
+    out = Json(std::move(wrapper));
+  }
+
+  if (config.strict_additional_properties && is_object_schema(out) && out.is_object()) {
+    auto& o = out.as_object();
+    if (o.find("additionalProperties") == o.end()) {
+      o["additionalProperties"] = Json(false);
+      warnings.push_back("set additionalProperties=false (strict_additional_properties)");
+    }
+  }
+
+  return out;
+}
+
+static Json jsonschema_to_gemini_schema(const Json& schema, std::vector<std::string>& warnings, int depth = 0) {
+  if (depth > 64) {
+    warnings.push_back("gemini schema conversion exceeded max depth; falling back to STRING");
+    JsonObject o;
+    o["type"] = Json("STRING");
+    return Json(std::move(o));
+  }
+
+  if (!schema.is_object()) {
+    JsonObject o;
+    o["type"] = Json("STRING");
+    warnings.push_back("gemini schema conversion: non-object schema treated as STRING");
+    return Json(std::move(o));
+  }
+
+  // Handle anyOf/oneOf/allOf by taking the first entry (best-effort).
+  const auto& so = schema.as_object();
+  for (const char* k : {"anyOf", "oneOf", "allOf"}) {
+    auto it = so.find(k);
+    if (it != so.end() && it->second.is_array() && !it->second.as_array().empty()) {
+      warnings.push_back(std::string("gemini schema conversion: '") + k + "' not fully supported; using first branch");
+      return jsonschema_to_gemini_schema(it->second.as_array().front(), warnings, depth + 1);
+    }
+  }
+
+  std::string ty;
+  auto it_ty = so.find("type");
+  if (it_ty != so.end() && it_ty->second.is_string()) {
+    ty = to_lower(it_ty->second.as_string());
+  } else if (so.find("properties") != so.end()) {
+    ty = "object";
+  }
+
+  JsonObject out;
+  if (ty == "object") {
+    out["type"] = Json("OBJECT");
+    // properties
+    auto it_props = so.find("properties");
+    if (it_props != so.end() && it_props->second.is_object()) {
+      JsonObject props;
+      for (const auto& kv : it_props->second.as_object()) {
+        props[kv.first] = jsonschema_to_gemini_schema(kv.second, warnings, depth + 1);
+      }
+      out["properties"] = Json(std::move(props));
+    }
+    // required
+    auto it_req = so.find("required");
+    if (it_req != so.end() && it_req->second.is_array()) {
+      JsonArray req;
+      for (const auto& v : it_req->second.as_array()) {
+        if (v.is_string()) req.emplace_back(Json(v.as_string()));
+      }
+      out["required"] = Json(std::move(req));
+    }
+    // additionalProperties ignored
+    if (so.find("additionalProperties") != so.end()) {
+      warnings.push_back("gemini schema conversion: additionalProperties is ignored");
+    }
+  } else if (ty == "array") {
+    out["type"] = Json("ARRAY");
+    auto it_items = so.find("items");
+    if (it_items != so.end()) {
+      out["items"] = jsonschema_to_gemini_schema(it_items->second, warnings, depth + 1);
+    }
+  } else if (ty == "string") {
+    out["type"] = Json("STRING");
+  } else if (ty == "number") {
+    out["type"] = Json("NUMBER");
+  } else if (ty == "integer") {
+    out["type"] = Json("INTEGER");
+  } else if (ty == "boolean") {
+    out["type"] = Json("BOOLEAN");
+  } else if (ty == "null") {
+    out["type"] = Json("STRING");
+    warnings.push_back("gemini schema conversion: null type not supported; mapped to STRING");
+  } else {
+    out["type"] = Json("STRING");
+    if (!ty.empty()) warnings.push_back("gemini schema conversion: unsupported type '" + ty + "'; mapped to STRING");
+  }
+
+  // description
+  auto it_desc = so.find("description");
+  if (it_desc != so.end() && it_desc->second.is_string()) {
+    out["description"] = Json(it_desc->second.as_string());
+  }
+
+  // enum
+  auto it_enum = so.find("enum");
+  if (it_enum != so.end() && it_enum->second.is_array()) {
+    out["enum"] = it_enum->second;
+  }
+
+  return Json(std::move(out));
+}
+
+static bool get_obj_field(const JsonObject& o, const std::string& key, Json& out) {
+  auto it = o.find(key);
+  if (it == o.end()) return false;
+  out = it->second;
+  return true;
+}
+
+static std::string get_obj_string(const JsonObject& o, const std::string& key) {
+  auto it = o.find(key);
+  if (it == o.end() || !it->second.is_string()) return "";
+  return it->second.as_string();
+}
+
+}  // namespace
+
+ToolSchemaBuildResult build_openai_function_tool(const std::string& name,
+                                                 const std::string& description,
+                                                 const Json& parameters_schema,
+                                                 const ToolSchemaConfig& config) {
+  ToolSchemaBuildResult out;
+  auto normalized = normalize_tool_parameters_schema(parameters_schema, config, out.warnings);
+
+  JsonObject fn;
+  fn["name"] = Json(name);
+  if (!description.empty()) fn["description"] = Json(description);
+  fn["parameters"] = normalized;
+
+  JsonObject tool;
+  tool["type"] = Json("function");
+  tool["function"] = Json(std::move(fn));
+  out.tool = Json(std::move(tool));
+  return out;
+}
+
+ToolSchemaBuildResult build_anthropic_tool(const std::string& name,
+                                           const std::string& description,
+                                           const Json& input_schema,
+                                           const ToolSchemaConfig& config) {
+  ToolSchemaBuildResult out;
+  auto normalized = normalize_tool_parameters_schema(input_schema, config, out.warnings);
+
+  JsonObject tool;
+  tool["name"] = Json(name);
+  if (!description.empty()) tool["description"] = Json(description);
+  tool["input_schema"] = normalized;
+  out.tool = Json(std::move(tool));
+  return out;
+}
+
+ToolSchemaBuildResult build_gemini_function_declaration(const std::string& name,
+                                                        const std::string& description,
+                                                        const Json& parameters_schema,
+                                                        const ToolSchemaConfig& config) {
+  ToolSchemaBuildResult out;
+  auto normalized = normalize_tool_parameters_schema(parameters_schema, config, out.warnings);
+  Json gemini_params = jsonschema_to_gemini_schema(normalized, out.warnings);
+
+  JsonObject tool;
+  tool["name"] = Json(name);
+  if (!description.empty()) tool["description"] = Json(description);
+  tool["parameters"] = gemini_params;
+  out.tool = Json(std::move(tool));
+  return out;
+}
+
+static ToolCallResult parse_tool_call_common(ToolPlatform platform,
+                                             const std::string& id,
+                                             const std::string& name,
+                                             const Json& arguments,
+                                             const std::string& fixed,
+                                             const RepairMetadata& parse_meta,
+                                             const Json& schema,
+                                             const ValidationRepairConfig& validation_repair,
+                                             const RepairConfig& /*parse_repair*/) {
+  ToolCallResult out;
+  out.platform = platform;
+  out.id = id;
+  out.name = name;
+  out.arguments = arguments;
+  out.fixed = fixed;
+  out.parse_metadata = parse_meta;
+
+  out.validation = validate_with_repair(arguments, schema, validation_repair);
+  out.ok = out.validation.valid || out.validation.fully_repaired;
+  if (!out.ok) out.error = "tool call arguments failed validation";
+  return out;
+}
+
+ToolCallResult parse_openai_tool_call(const Json& tool_call,
+                                      const Json& parameters_schema,
+                                      const ValidationRepairConfig& validation_repair,
+                                      const RepairConfig& parse_repair) {
+  ToolCallResult out;
+  out.platform = ToolPlatform::OpenAI;
+  if (!tool_call.is_object()) {
+    out.ok = false;
+    out.error = "openai tool_call must be an object";
+    return out;
+  }
+  const auto& o = tool_call.as_object();
+  const std::string id = get_obj_string(o, "id");
+
+  std::string name;
+  Json args;
+  bool has_args = false;
+
+  auto it_fn = o.find("function");
+  if (it_fn != o.end() && it_fn->second.is_object()) {
+    const auto& fo = it_fn->second.as_object();
+    name = get_obj_string(fo, "name");
+    auto it_args = fo.find("arguments");
+    if (it_args != fo.end()) {
+      args = it_args->second;
+      has_args = true;
+    }
+  }
+  if (name.empty()) name = get_obj_string(o, "name");
+  if (!has_args) {
+    auto it_args2 = o.find("arguments");
+    if (it_args2 != o.end()) {
+      args = it_args2->second;
+      has_args = true;
+    }
+  }
+
+  if (name.empty()) {
+    out.ok = false;
+    out.error = "openai tool_call missing function.name";
+    out.id = id;
+    return out;
+  }
+
+  std::vector<std::string> warnings;
+  Json schema = normalize_tool_parameters_schema(parameters_schema, ToolSchemaConfig{}, warnings);
+
+  RepairMetadata meta;
+  std::string fixed;
+  Json arguments;
+  if (!has_args) {
+    arguments = Json(JsonObject{});
+  } else if (args.is_string()) {
+    auto parsed = loads_jsonish_ex(args.as_string(), parse_repair);
+    arguments = parsed.value;
+    fixed = parsed.fixed;
+    meta = parsed.metadata;
+  } else {
+    arguments = args;
+  }
+
+  return parse_tool_call_common(ToolPlatform::OpenAI, id, name, arguments, fixed, meta, schema, validation_repair, parse_repair);
+}
+
+ToolCallResult parse_anthropic_tool_use(const Json& tool_use,
+                                        const Json& input_schema,
+                                        const ValidationRepairConfig& validation_repair,
+                                        const RepairConfig& parse_repair) {
+  ToolCallResult out;
+  out.platform = ToolPlatform::Anthropic;
+  if (!tool_use.is_object()) {
+    out.ok = false;
+    out.error = "anthropic tool_use must be an object";
+    return out;
+  }
+  const auto& o = tool_use.as_object();
+  const std::string id = get_obj_string(o, "id");
+  const std::string name = get_obj_string(o, "name");
+  if (name.empty()) {
+    out.ok = false;
+    out.error = "anthropic tool_use missing name";
+    out.id = id;
+    return out;
+  }
+
+  std::vector<std::string> warnings;
+  Json schema = normalize_tool_parameters_schema(input_schema, ToolSchemaConfig{}, warnings);
+
+  RepairMetadata meta;
+  std::string fixed;
+  Json arguments;
+  auto it_in = o.find("input");
+  if (it_in == o.end()) {
+    arguments = Json(JsonObject{});
+  } else if (it_in->second.is_string()) {
+    auto parsed = loads_jsonish_ex(it_in->second.as_string(), parse_repair);
+    arguments = parsed.value;
+    fixed = parsed.fixed;
+    meta = parsed.metadata;
+  } else {
+    arguments = it_in->second;
+  }
+
+  return parse_tool_call_common(ToolPlatform::Anthropic, id, name, arguments, fixed, meta, schema, validation_repair, parse_repair);
+}
+
+ToolCallResult parse_gemini_function_call(const Json& function_call,
+                                          const Json& parameters_schema,
+                                          const ValidationRepairConfig& validation_repair,
+                                          const RepairConfig& parse_repair) {
+  ToolCallResult out;
+  out.platform = ToolPlatform::Gemini;
+  if (!function_call.is_object()) {
+    out.ok = false;
+    out.error = "gemini function_call must be an object";
+    return out;
+  }
+  const auto& o = function_call.as_object();
+  const std::string name = get_obj_string(o, "name");
+  if (name.empty()) {
+    out.ok = false;
+    out.error = "gemini function_call missing name";
+    return out;
+  }
+
+  std::vector<std::string> warnings;
+  Json schema = normalize_tool_parameters_schema(parameters_schema, ToolSchemaConfig{}, warnings);
+
+  RepairMetadata meta;
+  std::string fixed;
+  Json arguments;
+  auto it_args = o.find("args");
+  if (it_args == o.end()) it_args = o.find("arguments");
+  if (it_args == o.end()) {
+    arguments = Json(JsonObject{});
+  } else if (it_args->second.is_string()) {
+    auto parsed = loads_jsonish_ex(it_args->second.as_string(), parse_repair);
+    arguments = parsed.value;
+    fixed = parsed.fixed;
+    meta = parsed.metadata;
+  } else {
+    arguments = it_args->second;
+  }
+
+  return parse_tool_call_common(ToolPlatform::Gemini, /*id*/ "", name, arguments, fixed, meta, schema, validation_repair, parse_repair);
+}
+
+std::vector<ToolCallResult> parse_openai_tool_calls_from_response(const Json& response,
+                                                                  const Json& schemas_by_name,
+                                                                  const ValidationRepairConfig& validation_repair,
+                                                                  const RepairConfig& parse_repair) {
+  std::vector<ToolCallResult> out;
+  if (!schemas_by_name.is_object()) return out;
+  const auto& schema_map = schemas_by_name.as_object();
+
+  auto handle_tool_call = [&](const Json& tc) {
+    if (!tc.is_object()) return;
+    std::string name;
+    const auto& o = tc.as_object();
+    auto it_fn = o.find("function");
+    if (it_fn != o.end() && it_fn->second.is_object()) {
+      name = get_obj_string(it_fn->second.as_object(), "name");
+    }
+    if (name.empty()) name = get_obj_string(o, "name");
+    auto it_schema = schema_map.find(name);
+    if (it_schema == schema_map.end()) {
+      ToolCallResult r;
+      r.platform = ToolPlatform::OpenAI;
+      r.ok = false;
+      r.name = name;
+      r.error = "unknown tool schema for name: " + name;
+      out.push_back(std::move(r));
+      return;
+    }
+    out.push_back(parse_openai_tool_call(tc, it_schema->second, validation_repair, parse_repair));
+  };
+
+  if (response.is_object()) {
+    const auto& ro = response.as_object();
+    // choices[].message.tool_calls[]
+    auto it_choices = ro.find("choices");
+    if (it_choices != ro.end() && it_choices->second.is_array()) {
+      for (const auto& choice : it_choices->second.as_array()) {
+        if (!choice.is_object()) continue;
+        const auto& co = choice.as_object();
+        auto it_msg = co.find("message");
+        if (it_msg == co.end() || !it_msg->second.is_object()) continue;
+        const auto& mo = it_msg->second.as_object();
+        auto it_tcs = mo.find("tool_calls");
+        if (it_tcs != mo.end() && it_tcs->second.is_array()) {
+          for (const auto& tc : it_tcs->second.as_array()) handle_tool_call(tc);
+        }
+      }
+    }
+    // Some SDKs may return tool_calls at top-level.
+    auto it_tcs2 = ro.find("tool_calls");
+    if (it_tcs2 != ro.end() && it_tcs2->second.is_array()) {
+      for (const auto& tc : it_tcs2->second.as_array()) handle_tool_call(tc);
+    }
+  }
+  return out;
+}
+
+std::vector<ToolCallResult> parse_anthropic_tool_uses_from_response(const Json& response,
+                                                                    const Json& schemas_by_name,
+                                                                    const ValidationRepairConfig& validation_repair,
+                                                                    const RepairConfig& parse_repair) {
+  std::vector<ToolCallResult> out;
+  if (!schemas_by_name.is_object()) return out;
+  const auto& schema_map = schemas_by_name.as_object();
+  if (!response.is_object()) return out;
+  const auto& ro = response.as_object();
+  auto it_content = ro.find("content");
+  if (it_content == ro.end() || !it_content->second.is_array()) return out;
+  for (const auto& part : it_content->second.as_array()) {
+    if (!part.is_object()) continue;
+    const auto& po = part.as_object();
+    const std::string type = get_obj_string(po, "type");
+    if (to_lower(type) != "tool_use") continue;
+    const std::string name = get_obj_string(po, "name");
+    auto it_schema = schema_map.find(name);
+    if (it_schema == schema_map.end()) {
+      ToolCallResult r;
+      r.platform = ToolPlatform::Anthropic;
+      r.ok = false;
+      r.name = name;
+      r.error = "unknown tool schema for name: " + name;
+      out.push_back(std::move(r));
+      continue;
+    }
+    out.push_back(parse_anthropic_tool_use(part, it_schema->second, validation_repair, parse_repair));
+  }
+  return out;
+}
+
+std::vector<ToolCallResult> parse_gemini_function_calls_from_response(const Json& response,
+                                                                      const Json& schemas_by_name,
+                                                                      const ValidationRepairConfig& validation_repair,
+                                                                      const RepairConfig& parse_repair) {
+  std::vector<ToolCallResult> out;
+  if (!schemas_by_name.is_object()) return out;
+  const auto& schema_map = schemas_by_name.as_object();
+  if (!response.is_object()) return out;
+  const auto& ro = response.as_object();
+  auto it_cands = ro.find("candidates");
+  if (it_cands == ro.end() || !it_cands->second.is_array()) return out;
+  for (const auto& cand : it_cands->second.as_array()) {
+    if (!cand.is_object()) continue;
+    const auto& co = cand.as_object();
+    auto it_content = co.find("content");
+    if (it_content == co.end() || !it_content->second.is_object()) continue;
+    const auto& cont = it_content->second.as_object();
+    auto it_parts = cont.find("parts");
+    if (it_parts == cont.end() || !it_parts->second.is_array()) continue;
+    for (const auto& part : it_parts->second.as_array()) {
+      if (!part.is_object()) continue;
+      const auto& po = part.as_object();
+      auto it_fc = po.find("functionCall");
+      if (it_fc == po.end() || !it_fc->second.is_object()) continue;
+      const auto& fco = it_fc->second.as_object();
+      const std::string name = get_obj_string(fco, "name");
+      auto it_schema = schema_map.find(name);
+      if (it_schema == schema_map.end()) {
+        ToolCallResult r;
+        r.platform = ToolPlatform::Gemini;
+        r.ok = false;
+        r.name = name;
+        r.error = "unknown tool schema for name: " + name;
+        out.push_back(std::move(r));
+        continue;
+      }
+      out.push_back(parse_gemini_function_call(it_fc->second, it_schema->second, validation_repair, parse_repair));
+    }
+  }
+  return out;
+}
+
 static void apply_defaults(Json& value, const Json& schema) {
   if (!schema.is_object()) return;
   const auto& sch = schema.as_object();

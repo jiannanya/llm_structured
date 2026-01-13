@@ -207,6 +207,103 @@ ValidationRepairResult parse_and_repair(
     const ValidationRepairConfig& config = ValidationRepairConfig{},
     const RepairConfig& parse_repair = RepairConfig{});
 
+// ---------------- Function Calling / Tool Use ----------------
+
+enum class ToolPlatform {
+  OpenAI,
+  Anthropic,
+  Gemini,
+};
+
+struct ToolSchemaConfig {
+  // Tool schemas are generally object-parameterized. If the provided schema isn't an object schema,
+  // wrap it as {"type":"object","properties":{"value":<schema>},"required":["value"]}.
+  bool wrap_non_object{true};
+
+  // If an object schema omits additionalProperties, set additionalProperties=false.
+  bool strict_additional_properties{true};
+};
+
+struct ToolSchemaBuildResult {
+  Json tool;
+  std::vector<std::string> warnings;
+};
+
+// Build platform-specific tool schema objects from a JSON Schema.
+//
+// OpenAI: { type: "function", function: { name, description, parameters } }
+ToolSchemaBuildResult build_openai_function_tool(
+  const std::string& name,
+  const std::string& description,
+  const Json& parameters_schema,
+  const ToolSchemaConfig& config = ToolSchemaConfig{});
+
+// Anthropic: { name, description, input_schema }
+ToolSchemaBuildResult build_anthropic_tool(
+  const std::string& name,
+  const std::string& description,
+  const Json& input_schema,
+  const ToolSchemaConfig& config = ToolSchemaConfig{});
+
+// Gemini (functionDeclaration): { name, description, parameters } where parameters uses Gemini schema.
+ToolSchemaBuildResult build_gemini_function_declaration(
+  const std::string& name,
+  const std::string& description,
+  const Json& parameters_schema,
+  const ToolSchemaConfig& config = ToolSchemaConfig{});
+
+// Result of parsing + validating a tool call.
+struct ToolCallResult {
+  bool ok{false};
+  ToolPlatform platform{ToolPlatform::OpenAI};
+  std::string id;
+  std::string name;
+  Json arguments;
+  std::string fixed;          // only for platforms that pass arguments as text
+  RepairMetadata parse_metadata;  // only for platforms that pass arguments as text
+  ValidationRepairResult validation;
+  std::string error;
+};
+
+// Parse/validate single tool call payloads.
+ToolCallResult parse_openai_tool_call(
+  const Json& tool_call,
+  const Json& parameters_schema,
+  const ValidationRepairConfig& validation_repair = ValidationRepairConfig{},
+  const RepairConfig& parse_repair = RepairConfig{});
+
+ToolCallResult parse_anthropic_tool_use(
+  const Json& tool_use,
+  const Json& input_schema,
+  const ValidationRepairConfig& validation_repair = ValidationRepairConfig{},
+  const RepairConfig& parse_repair = RepairConfig{});
+
+ToolCallResult parse_gemini_function_call(
+  const Json& function_call,
+  const Json& parameters_schema,
+  const ValidationRepairConfig& validation_repair = ValidationRepairConfig{},
+  const RepairConfig& parse_repair = RepairConfig{});
+
+// Convenience: parse/validate tool calls from common response envelopes.
+// - schemas_by_name: object mapping tool/function name -> JSON Schema
+std::vector<ToolCallResult> parse_openai_tool_calls_from_response(
+  const Json& response,
+  const Json& schemas_by_name,
+  const ValidationRepairConfig& validation_repair = ValidationRepairConfig{},
+  const RepairConfig& parse_repair = RepairConfig{});
+
+std::vector<ToolCallResult> parse_anthropic_tool_uses_from_response(
+  const Json& response,
+  const Json& schemas_by_name,
+  const ValidationRepairConfig& validation_repair = ValidationRepairConfig{},
+  const RepairConfig& parse_repair = RepairConfig{});
+
+std::vector<ToolCallResult> parse_gemini_function_calls_from_response(
+  const Json& response,
+  const Json& schemas_by_name,
+  const ValidationRepairConfig& validation_repair = ValidationRepairConfig{},
+  const RepairConfig& parse_repair = RepairConfig{});
+
 // ---------------- Markdown ----------------
 
 struct MarkdownHeading {

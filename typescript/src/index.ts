@@ -77,6 +77,64 @@ const native = require(path.join(__dirname, "..", "..", "build", "Release", "add
     suggestions: RepairSuggestion[];
     unfixableErrors: Array<NativeValidationError & { jsonPointer?: string }>;
   };
+
+  // Function Calling / Tool Use
+  buildOpenaiFunctionTool(
+    name: string,
+    description?: string,
+    parametersSchemaJson?: string,
+    config?: ToolSchemaConfig
+  ): { tool: JsonValue; warnings: string[] };
+  buildAnthropicTool(
+    name: string,
+    description?: string,
+    inputSchemaJson?: string,
+    config?: ToolSchemaConfig
+  ): { tool: JsonValue; warnings: string[] };
+  buildGeminiFunctionDeclaration(
+    name: string,
+    description?: string,
+    parametersSchemaJson?: string,
+    config?: ToolSchemaConfig
+  ): { tool: JsonValue; warnings: string[] };
+
+  parseOpenaiToolCall(
+    toolCall: JsonValue,
+    parametersSchemaJson: string,
+    validationRepair?: ValidationRepairConfig,
+    parseRepair?: RepairConfig
+  ): ToolCallResult;
+  parseAnthropicToolUse(
+    toolUse: JsonValue,
+    inputSchemaJson: string,
+    validationRepair?: ValidationRepairConfig,
+    parseRepair?: RepairConfig
+  ): ToolCallResult;
+  parseGeminiFunctionCall(
+    functionCall: JsonValue,
+    parametersSchemaJson: string,
+    validationRepair?: ValidationRepairConfig,
+    parseRepair?: RepairConfig
+  ): ToolCallResult;
+
+  parseOpenaiToolCallsFromResponse(
+    response: JsonValue,
+    schemasByNameJson: string,
+    validationRepair?: ValidationRepairConfig,
+    parseRepair?: RepairConfig
+  ): ToolCallResult[];
+  parseAnthropicToolUsesFromResponse(
+    response: JsonValue,
+    schemasByNameJson: string,
+    validationRepair?: ValidationRepairConfig,
+    parseRepair?: RepairConfig
+  ): ToolCallResult[];
+  parseGeminiFunctionCallsFromResponse(
+    response: JsonValue,
+    schemasByNameJson: string,
+    validationRepair?: ValidationRepairConfig,
+    parseRepair?: RepairConfig
+  ): ToolCallResult[];
   parseAndValidateSql(sqlText: string, schemaJson: string): SqlParsed;
   parseAndValidateMarkdown(
     markdownText: string,
@@ -194,6 +252,41 @@ export interface RepairMetadata {
 
   // Which duplicate key policy was applied during parsing.
   duplicateKeyPolicy: "firstWins" | "lastWins" | "error";
+}
+
+// ---- Function Calling / Tool Use types ----
+
+export interface ToolSchemaConfig {
+  // If schema is an object schema and doesn't specify additionalProperties,
+  // default it to false.
+  strictAdditionalProperties?: boolean;
+  // If the schema is not an object schema, wrap it as {value: <schema>}.
+  wrapNonObject?: boolean;
+}
+
+export interface ToolSchemaBuildResult {
+  tool: JsonValue;
+  warnings: string[];
+}
+
+export type ToolPlatform = "openai" | "anthropic" | "gemini";
+
+export interface ToolCallResult {
+  platform: ToolPlatform;
+  ok: boolean;
+  id: string;
+  name: string;
+  arguments: JsonValue;
+  fixed: string;
+  parseMetadata: RepairMetadata;
+  validation: {
+    valid: boolean;
+    fullyRepaired: boolean;
+    repairedValue: JsonValue;
+    suggestions: RepairSuggestion[];
+    unfixableErrors: Array<NativeValidationError & { jsonPointer?: string }>;
+  };
+  error: string;
 }
 
 export interface YamlRepairConfig {

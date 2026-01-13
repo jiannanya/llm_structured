@@ -1101,6 +1101,551 @@ static napi_value ParseAndRepair(napi_env env, napi_callback_info info) {
   }
 }
 
+// ---- Function Calling / Tool Use ----
+
+static bool ToolSchemaConfigFromNapi(napi_env env, napi_value v, llm_structured::ToolSchemaConfig& out) {
+  napi_valuetype t;
+  if (napi_typeof(env, v, &t) != napi_ok) return false;
+  if (t == napi_null || t == napi_undefined) return true;
+  if (t != napi_object) {
+    ThrowTypeError(env, "tool schema config must be an object");
+    return false;
+  }
+
+  if (!GetOptionalBoolProperty(env, v, "strictAdditionalProperties", out.strict_additional_properties)) return false;
+  if (!GetOptionalBoolProperty(env, v, "wrapNonObject", out.wrap_non_object)) return false;
+  // snake_case too
+  if (!GetOptionalBoolProperty(env, v, "strict_additional_properties", out.strict_additional_properties)) return false;
+  if (!GetOptionalBoolProperty(env, v, "wrap_non_object", out.wrap_non_object)) return false;
+  return true;
+}
+
+static napi_value ValidationRepairResultToNapi(napi_env env, const llm_structured::ValidationRepairResult& r) {
+  napi_value out;
+  napi_create_object(env, &out);
+  napi_value b;
+  napi_get_boolean(env, r.valid, &b);
+  napi_set_named_property(env, out, "valid", b);
+  napi_get_boolean(env, r.fully_repaired, &b);
+  napi_set_named_property(env, out, "fullyRepaired", b);
+  napi_set_named_property(env, out, "repairedValue", ToNapi(env, r.repaired_value));
+
+  napi_value sugg;
+  napi_create_array_with_length(env, r.suggestions.size(), &sugg);
+  for (size_t i = 0; i < r.suggestions.size(); ++i) {
+    napi_set_element(env, sugg, static_cast<uint32_t>(i), RepairSuggestionToNapi(env, r.suggestions[i]));
+  }
+  napi_set_named_property(env, out, "suggestions", sugg);
+
+  napi_value errs;
+  napi_create_array_with_length(env, r.unfixable_errors.size(), &errs);
+  for (size_t i = 0; i < r.unfixable_errors.size(); ++i) {
+    napi_value obj;
+    napi_create_object(env, &obj);
+    napi_set_named_property(env, obj, "message", MakeString(env, r.unfixable_errors[i].what()));
+    napi_set_named_property(env, obj, "path", MakeString(env, r.unfixable_errors[i].path));
+    napi_set_named_property(env, obj, "kind", MakeString(env, r.unfixable_errors[i].kind));
+    napi_set_named_property(env, obj, "jsonPointer",
+                            MakeString(env, llm_structured::json_pointer_from_path(r.unfixable_errors[i].path)));
+    napi_set_element(env, errs, static_cast<uint32_t>(i), obj);
+  }
+  napi_set_named_property(env, out, "unfixableErrors", errs);
+  return out;
+}
+
+static napi_value ToolCallResultToNapi(napi_env env, const llm_structured::ToolCallResult& r) {
+  napi_value out;
+  napi_create_object(env, &out);
+
+  std::string platform = "unknown";
+  if (r.platform == llm_structured::ToolPlatform::OpenAI) platform = "openai";
+  if (r.platform == llm_structured::ToolPlatform::Anthropic) platform = "anthropic";
+  if (r.platform == llm_structured::ToolPlatform::Gemini) platform = "gemini";
+  napi_set_named_property(env, out, "platform", MakeString(env, platform));
+
+  napi_value b;
+  napi_get_boolean(env, r.ok, &b);
+  napi_set_named_property(env, out, "ok", b);
+  napi_set_named_property(env, out, "id", MakeString(env, r.id));
+  napi_set_named_property(env, out, "name", MakeString(env, r.name));
+  napi_set_named_property(env, out, "arguments", ToNapi(env, r.arguments));
+  napi_set_named_property(env, out, "fixed", MakeString(env, r.fixed));
+  napi_set_named_property(env, out, "parseMetadata", RepairMetadataToNapi(env, r.parse_metadata));
+  napi_set_named_property(env, out, "validation", ValidationRepairResultToNapi(env, r.validation));
+  napi_set_named_property(env, out, "error", MakeString(env, r.error));
+  return out;
+}
+
+static napi_value BuildOpenaiFunctionTool(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1) {
+    ThrowTypeError(env, "buildOpenaiFunctionTool(name, description?, parametersSchemaJson?, config?) expects at least 1 argument");
+    return nullptr;
+  }
+
+  std::string name;
+  if (!GetStringUtf8(env, argv[0], name)) {
+    ThrowTypeError(env, "buildOpenaiFunctionTool(...) expects name as string");
+    return nullptr;
+  }
+
+  std::string description;
+  if (argc >= 2) {
+    // allow undefined
+    napi_valuetype t;
+    napi_typeof(env, argv[1], &t);
+    if (t != napi_null && t != napi_undefined) {
+      if (!GetStringUtf8(env, argv[1], description)) {
+        ThrowTypeError(env, "buildOpenaiFunctionTool(...) expects description as string");
+        return nullptr;
+      }
+    }
+  }
+
+  std::string schema_text = "{}";
+  if (argc >= 3) {
+    napi_valuetype t;
+    napi_typeof(env, argv[2], &t);
+    if (t != napi_null && t != napi_undefined) {
+      if (!GetStringUtf8(env, argv[2], schema_text)) {
+        ThrowTypeError(env, "buildOpenaiFunctionTool(...) expects parametersSchemaJson as string");
+        return nullptr;
+      }
+    }
+  }
+
+  llm_structured::ToolSchemaConfig cfg;
+  if (argc >= 4) {
+    if (!ToolSchemaConfigFromNapi(env, argv[3], cfg)) return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    const auto r = llm_structured::build_openai_function_tool(name, description, schema, cfg);
+
+    napi_value out;
+    napi_create_object(env, &out);
+    napi_set_named_property(env, out, "tool", ToNapi(env, r.tool));
+    napi_value warnings;
+    napi_create_array_with_length(env, r.warnings.size(), &warnings);
+    for (size_t i = 0; i < r.warnings.size(); ++i) {
+      napi_set_element(env, warnings, static_cast<uint32_t>(i), MakeString(env, r.warnings[i]));
+    }
+    napi_set_named_property(env, out, "warnings", warnings);
+    return out;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value BuildAnthropicTool(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1) {
+    ThrowTypeError(env, "buildAnthropicTool(name, description?, inputSchemaJson?, config?) expects at least 1 argument");
+    return nullptr;
+  }
+
+  std::string name;
+  if (!GetStringUtf8(env, argv[0], name)) {
+    ThrowTypeError(env, "buildAnthropicTool(...) expects name as string");
+    return nullptr;
+  }
+
+  std::string description;
+  if (argc >= 2) {
+    napi_valuetype t;
+    napi_typeof(env, argv[1], &t);
+    if (t != napi_null && t != napi_undefined) {
+      if (!GetStringUtf8(env, argv[1], description)) {
+        ThrowTypeError(env, "buildAnthropicTool(...) expects description as string");
+        return nullptr;
+      }
+    }
+  }
+
+  std::string schema_text = "{}";
+  if (argc >= 3) {
+    napi_valuetype t;
+    napi_typeof(env, argv[2], &t);
+    if (t != napi_null && t != napi_undefined) {
+      if (!GetStringUtf8(env, argv[2], schema_text)) {
+        ThrowTypeError(env, "buildAnthropicTool(...) expects inputSchemaJson as string");
+        return nullptr;
+      }
+    }
+  }
+
+  llm_structured::ToolSchemaConfig cfg;
+  if (argc >= 4) {
+    if (!ToolSchemaConfigFromNapi(env, argv[3], cfg)) return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    const auto r = llm_structured::build_anthropic_tool(name, description, schema, cfg);
+    napi_value out;
+    napi_create_object(env, &out);
+    napi_set_named_property(env, out, "tool", ToNapi(env, r.tool));
+    napi_value warnings;
+    napi_create_array_with_length(env, r.warnings.size(), &warnings);
+    for (size_t i = 0; i < r.warnings.size(); ++i) {
+      napi_set_element(env, warnings, static_cast<uint32_t>(i), MakeString(env, r.warnings[i]));
+    }
+    napi_set_named_property(env, out, "warnings", warnings);
+    return out;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value BuildGeminiFunctionDeclaration(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1) {
+    ThrowTypeError(env, "buildGeminiFunctionDeclaration(name, description?, parametersSchemaJson?, config?) expects at least 1 argument");
+    return nullptr;
+  }
+
+  std::string name;
+  if (!GetStringUtf8(env, argv[0], name)) {
+    ThrowTypeError(env, "buildGeminiFunctionDeclaration(...) expects name as string");
+    return nullptr;
+  }
+
+  std::string description;
+  if (argc >= 2) {
+    napi_valuetype t;
+    napi_typeof(env, argv[1], &t);
+    if (t != napi_null && t != napi_undefined) {
+      if (!GetStringUtf8(env, argv[1], description)) {
+        ThrowTypeError(env, "buildGeminiFunctionDeclaration(...) expects description as string");
+        return nullptr;
+      }
+    }
+  }
+
+  std::string schema_text = "{}";
+  if (argc >= 3) {
+    napi_valuetype t;
+    napi_typeof(env, argv[2], &t);
+    if (t != napi_null && t != napi_undefined) {
+      if (!GetStringUtf8(env, argv[2], schema_text)) {
+        ThrowTypeError(env, "buildGeminiFunctionDeclaration(...) expects parametersSchemaJson as string");
+        return nullptr;
+      }
+    }
+  }
+
+  llm_structured::ToolSchemaConfig cfg;
+  if (argc >= 4) {
+    if (!ToolSchemaConfigFromNapi(env, argv[3], cfg)) return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    const auto r = llm_structured::build_gemini_function_declaration(name, description, schema, cfg);
+    napi_value out;
+    napi_create_object(env, &out);
+    napi_set_named_property(env, out, "tool", ToNapi(env, r.tool));
+    napi_value warnings;
+    napi_create_array_with_length(env, r.warnings.size(), &warnings);
+    for (size_t i = 0; i < r.warnings.size(); ++i) {
+      napi_set_element(env, warnings, static_cast<uint32_t>(i), MakeString(env, r.warnings[i]));
+    }
+    napi_set_named_property(env, out, "warnings", warnings);
+    return out;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseOpenaiToolCall(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2) {
+    ThrowTypeError(env, "parseOpenaiToolCall(toolCall, parametersSchemaJson, validationRepair?, parseRepair?) expects at least 2 arguments");
+    return nullptr;
+  }
+
+  Json tool_call;
+  if (!FromNapi(env, argv[0], tool_call)) {
+    ThrowTypeError(env, "parseOpenaiToolCall(...) received an unsupported JS value for toolCall");
+    return nullptr;
+  }
+
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseOpenaiToolCall(...) expects parametersSchemaJson as string");
+    return nullptr;
+  }
+
+  llm_structured::ValidationRepairConfig cfg;
+  if (argc >= 3) {
+    if (!ValidationRepairConfigFromNapi(env, argv[2], cfg)) return nullptr;
+  }
+
+  llm_structured::RepairConfig parse_repair;
+  if (argc >= 4) {
+    if (!RepairConfigFromNapi(env, argv[3], parse_repair)) return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    const auto r = llm_structured::parse_openai_tool_call(tool_call, schema, cfg, parse_repair);
+    return ToolCallResultToNapi(env, r);
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseAnthropicToolUse(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2) {
+    ThrowTypeError(env, "parseAnthropicToolUse(toolUse, inputSchemaJson, validationRepair?, parseRepair?) expects at least 2 arguments");
+    return nullptr;
+  }
+
+  Json tool_use;
+  if (!FromNapi(env, argv[0], tool_use)) {
+    ThrowTypeError(env, "parseAnthropicToolUse(...) received an unsupported JS value for toolUse");
+    return nullptr;
+  }
+
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseAnthropicToolUse(...) expects inputSchemaJson as string");
+    return nullptr;
+  }
+
+  llm_structured::ValidationRepairConfig cfg;
+  if (argc >= 3) {
+    if (!ValidationRepairConfigFromNapi(env, argv[2], cfg)) return nullptr;
+  }
+
+  llm_structured::RepairConfig parse_repair;
+  if (argc >= 4) {
+    if (!RepairConfigFromNapi(env, argv[3], parse_repair)) return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    const auto r = llm_structured::parse_anthropic_tool_use(tool_use, schema, cfg, parse_repair);
+    return ToolCallResultToNapi(env, r);
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseGeminiFunctionCall(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2) {
+    ThrowTypeError(env, "parseGeminiFunctionCall(functionCall, parametersSchemaJson, validationRepair?, parseRepair?) expects at least 2 arguments");
+    return nullptr;
+  }
+
+  Json fc;
+  if (!FromNapi(env, argv[0], fc)) {
+    ThrowTypeError(env, "parseGeminiFunctionCall(...) received an unsupported JS value for functionCall");
+    return nullptr;
+  }
+
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseGeminiFunctionCall(...) expects parametersSchemaJson as string");
+    return nullptr;
+  }
+
+  llm_structured::ValidationRepairConfig cfg;
+  if (argc >= 3) {
+    if (!ValidationRepairConfigFromNapi(env, argv[2], cfg)) return nullptr;
+  }
+
+  llm_structured::RepairConfig parse_repair;
+  if (argc >= 4) {
+    if (!RepairConfigFromNapi(env, argv[3], parse_repair)) return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    const auto r = llm_structured::parse_gemini_function_call(fc, schema, cfg, parse_repair);
+    return ToolCallResultToNapi(env, r);
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseOpenaiToolCallsFromResponse(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2) {
+    ThrowTypeError(env, "parseOpenaiToolCallsFromResponse(response, schemasByNameJson, validationRepair?, parseRepair?) expects at least 2 arguments");
+    return nullptr;
+  }
+
+  Json response;
+  if (!FromNapi(env, argv[0], response)) {
+    ThrowTypeError(env, "parseOpenaiToolCallsFromResponse(...) received an unsupported JS value for response");
+    return nullptr;
+  }
+
+  std::string schemas_text;
+  if (!GetStringUtf8(env, argv[1], schemas_text)) {
+    ThrowTypeError(env, "parseOpenaiToolCallsFromResponse(...) expects schemasByNameJson as string");
+    return nullptr;
+  }
+
+  llm_structured::ValidationRepairConfig cfg;
+  if (argc >= 3) {
+    if (!ValidationRepairConfigFromNapi(env, argv[2], cfg)) return nullptr;
+  }
+
+  llm_structured::RepairConfig parse_repair;
+  if (argc >= 4) {
+    if (!RepairConfigFromNapi(env, argv[3], parse_repair)) return nullptr;
+  }
+
+  try {
+    Json schemas = llm_structured::loads_jsonish(schemas_text);
+    const auto calls = llm_structured::parse_openai_tool_calls_from_response(response, schemas, cfg, parse_repair);
+    napi_value arr;
+    napi_create_array_with_length(env, calls.size(), &arr);
+    for (size_t i = 0; i < calls.size(); ++i) {
+      napi_set_element(env, arr, static_cast<uint32_t>(i), ToolCallResultToNapi(env, calls[i]));
+    }
+    return arr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseAnthropicToolUsesFromResponse(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2) {
+    ThrowTypeError(env, "parseAnthropicToolUsesFromResponse(response, schemasByNameJson, validationRepair?, parseRepair?) expects at least 2 arguments");
+    return nullptr;
+  }
+
+  Json response;
+  if (!FromNapi(env, argv[0], response)) {
+    ThrowTypeError(env, "parseAnthropicToolUsesFromResponse(...) received an unsupported JS value for response");
+    return nullptr;
+  }
+
+  std::string schemas_text;
+  if (!GetStringUtf8(env, argv[1], schemas_text)) {
+    ThrowTypeError(env, "parseAnthropicToolUsesFromResponse(...) expects schemasByNameJson as string");
+    return nullptr;
+  }
+
+  llm_structured::ValidationRepairConfig cfg;
+  if (argc >= 3) {
+    if (!ValidationRepairConfigFromNapi(env, argv[2], cfg)) return nullptr;
+  }
+
+  llm_structured::RepairConfig parse_repair;
+  if (argc >= 4) {
+    if (!RepairConfigFromNapi(env, argv[3], parse_repair)) return nullptr;
+  }
+
+  try {
+    Json schemas = llm_structured::loads_jsonish(schemas_text);
+    const auto calls = llm_structured::parse_anthropic_tool_uses_from_response(response, schemas, cfg, parse_repair);
+    napi_value arr;
+    napi_create_array_with_length(env, calls.size(), &arr);
+    for (size_t i = 0; i < calls.size(); ++i) {
+      napi_set_element(env, arr, static_cast<uint32_t>(i), ToolCallResultToNapi(env, calls[i]));
+    }
+    return arr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseGeminiFunctionCallsFromResponse(napi_env env, napi_callback_info info) {
+  size_t argc = 4;
+  napi_value argv[4];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2) {
+    ThrowTypeError(env, "parseGeminiFunctionCallsFromResponse(response, schemasByNameJson, validationRepair?, parseRepair?) expects at least 2 arguments");
+    return nullptr;
+  }
+
+  Json response;
+  if (!FromNapi(env, argv[0], response)) {
+    ThrowTypeError(env, "parseGeminiFunctionCallsFromResponse(...) received an unsupported JS value for response");
+    return nullptr;
+  }
+
+  std::string schemas_text;
+  if (!GetStringUtf8(env, argv[1], schemas_text)) {
+    ThrowTypeError(env, "parseGeminiFunctionCallsFromResponse(...) expects schemasByNameJson as string");
+    return nullptr;
+  }
+
+  llm_structured::ValidationRepairConfig cfg;
+  if (argc >= 3) {
+    if (!ValidationRepairConfigFromNapi(env, argv[2], cfg)) return nullptr;
+  }
+
+  llm_structured::RepairConfig parse_repair;
+  if (argc >= 4) {
+    if (!RepairConfigFromNapi(env, argv[3], parse_repair)) return nullptr;
+  }
+
+  try {
+    Json schemas = llm_structured::loads_jsonish(schemas_text);
+    const auto calls = llm_structured::parse_gemini_function_calls_from_response(response, schemas, cfg, parse_repair);
+    napi_value arr;
+    napi_create_array_with_length(env, calls.size(), &arr);
+    for (size_t i = 0; i < calls.size(); ++i) {
+      napi_set_element(env, arr, static_cast<uint32_t>(i), ToolCallResultToNapi(env, calls[i]));
+    }
+    return arr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
 // ---- YAML APIs ----
 
 static napi_value ExtractYamlCandidate(napi_env env, napi_callback_info info) {
@@ -3690,6 +4235,15 @@ static napi_value Init(napi_env env, napi_value exports) {
   {"validateAllJsonValue", nullptr, ValidateAllJsonValue, nullptr, nullptr, nullptr, napi_default, nullptr},
   {"validateWithRepair", nullptr, ValidateWithRepair, nullptr, nullptr, nullptr, napi_default, nullptr},
   {"parseAndRepair", nullptr, ParseAndRepair, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"buildOpenaiFunctionTool", nullptr, BuildOpenaiFunctionTool, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"buildAnthropicTool", nullptr, BuildAnthropicTool, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"buildGeminiFunctionDeclaration", nullptr, BuildGeminiFunctionDeclaration, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"parseOpenaiToolCall", nullptr, ParseOpenaiToolCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"parseAnthropicToolUse", nullptr, ParseAnthropicToolUse, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"parseGeminiFunctionCall", nullptr, ParseGeminiFunctionCall, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"parseOpenaiToolCallsFromResponse", nullptr, ParseOpenaiToolCallsFromResponse, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"parseAnthropicToolUsesFromResponse", nullptr, ParseAnthropicToolUsesFromResponse, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"parseGeminiFunctionCallsFromResponse", nullptr, ParseGeminiFunctionCallsFromResponse, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"extractYamlCandidate", nullptr, ExtractYamlCandidate, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"extractYamlCandidates", nullptr, ExtractYamlCandidates, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"loadsYamlishEx", nullptr, LoadsYamlishEx, nullptr, nullptr, nullptr, napi_default, nullptr},

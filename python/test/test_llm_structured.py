@@ -16,6 +16,15 @@ from llm_structured import (
     parse_and_validate_kv,
     parse_and_validate_markdown,
     parse_and_validate_sql,
+    build_openai_function_tool,
+    build_anthropic_tool,
+    build_gemini_function_declaration,
+    parse_openai_tool_call,
+    parse_anthropic_tool_use,
+    parse_gemini_function_call,
+    parse_openai_tool_calls_from_response,
+    parse_anthropic_tool_uses_from_response,
+    parse_gemini_function_calls_from_response,
     JsonStreamParser,
     JsonStreamValidatedBatchCollector,
 )
@@ -461,6 +470,157 @@ class TestSqlValidation(unittest.TestCase):
                 "SELECT u.id FROM users u JOIN orders o ON o.user_id = u.id LIMIT 1",
                 {"maxJoins": 0},
             )
+
+
+class TestToolCalling(unittest.TestCase):
+    def test_build_tool_schemas(self) -> None:
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["id"],
+            "properties": {"id": {"type": "integer"}},
+        }
+
+        openai = build_openai_function_tool("get_user", "Get a user", schema)
+        self.assertEqual(openai["tool"]["type"], "function")
+        self.assertEqual(openai["tool"]["function"]["name"], "get_user")
+        self.assertIn("parameters", openai["tool"]["function"])
+
+        anthropic = build_anthropic_tool("get_user", "Get a user", schema)
+        self.assertEqual(anthropic["tool"]["name"], "get_user")
+        self.assertIn("input_schema", anthropic["tool"])
+
+        gemini = build_gemini_function_declaration("get_user", "Get a user", schema)
+        self.assertEqual(gemini["tool"]["name"], "get_user")
+        self.assertIn("parameters", gemini["tool"])
+
+    def test_parse_openai_tool_call_with_repair(self) -> None:
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["id"],
+            "properties": {"id": {"type": "integer"}},
+        }
+
+        tool_call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "get_user",
+                "arguments": "{'id': '123',}",
+            },
+        }
+
+        r = parse_openai_tool_call(
+            tool_call,
+            schema,
+            validation_repair={"coerce_types": True},
+            parse_repair={"allowSingleQuotes": True, "dropTrailingCommas": True},
+        )
+        self.assertEqual(r["platform"], "openai")
+        self.assertEqual(r["name"], "get_user")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["validation"]["repaired_value"], {"id": 123})
+
+    def test_parse_anthropic_tool_use_with_repair(self) -> None:
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["id"],
+            "properties": {"id": {"type": "integer"}},
+        }
+
+        tool_use = {
+            "type": "tool_use",
+            "id": "tu_1",
+            "name": "get_user",
+            "input": {"id": "123", "extra": 1},
+        }
+
+        r = parse_anthropic_tool_use(
+            tool_use,
+            schema,
+            validation_repair={"coerce_types": True, "remove_extra_properties": True},
+        )
+        self.assertEqual(r["platform"], "anthropic")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["validation"]["repaired_value"], {"id": 123})
+
+    def test_parse_gemini_function_call_with_repair(self) -> None:
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["id"],
+            "properties": {"id": {"type": "integer"}},
+        }
+
+        function_call = {"name": "get_user", "args": {"id": "123"}}
+        r = parse_gemini_function_call(function_call, schema, validation_repair={"coerce_types": True})
+        self.assertEqual(r["platform"], "gemini")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["validation"]["repaired_value"], {"id": 123})
+
+    def test_extract_from_responses_and_unknown_schema(self) -> None:
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["id"],
+            "properties": {"id": {"type": "integer"}},
+        }
+        schemas = {"get_user": schema}
+
+        openai_resp = {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {"id": "call_1", "type": "function", "function": {"name": "get_user", "arguments": "{'id':'1'}"}}
+                        ]
+                    }
+                }
+            ]
+        }
+        calls = parse_openai_tool_calls_from_response(
+            openai_resp,
+            schemas,
+            validation_repair={"coerce_types": True},
+            parse_repair={"allowSingleQuotes": True},
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["ok"])
+
+        anthropic_resp = {
+            "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "tool_use", "id": "tu_1", "name": "get_user", "input": {"id": "2"}},
+            ]
+        }
+        uses = parse_anthropic_tool_uses_from_response(anthropic_resp, schemas, validation_repair={"coerce_types": True})
+        self.assertEqual(len(uses), 1)
+        self.assertTrue(uses[0]["ok"])
+
+        gemini_resp = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"functionCall": {"name": "get_user", "args": {"id": "3"}}},
+                        ]
+                    }
+                }
+            ]
+        }
+        fcs = parse_gemini_function_calls_from_response(gemini_resp, schemas, validation_repair={"coerce_types": True})
+        self.assertEqual(len(fcs), 1)
+        self.assertTrue(fcs[0]["ok"])
+
+        unknown = parse_openai_tool_calls_from_response(
+            {"tool_calls": [{"id": "call_x", "type": "function", "function": {"name": "nope", "arguments": "{}"}}]},
+            schemas,
+        )
+        self.assertEqual(len(unknown), 1)
+        self.assertFalse(unknown[0]["ok"])
+        self.assertIn("unknown tool schema", unknown[0]["error"])
 
         with self.assertRaises(ValidationError):
             parse_and_validate_sql(

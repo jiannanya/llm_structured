@@ -261,6 +261,7 @@ r = validate_with_repair(value, schema, {
 })
 
 print(r["valid"], r["fully_repaired"], r["repaired_value"])
+
 ```
 
 TypeScript:
@@ -286,6 +287,111 @@ const r = validateWithRepair({ age: "200", name: "Alice", extra: 1 } as any, sch
 });
 
 console.log(r.valid, r.fullyRepaired, r.repairedValue);
+```
+
+### Function Calling / Tool Use
+
+Build tool schemas for major providers and parse tool calls back from responses.
+
+What you get:
+
+- Schema builders to convert a JSON Schema into each provider's tool/function declaration shape.
+- Tool-call parsers that extract arguments and run validation + repair using `validate_with_repair`.
+- Convenience helpers that scan common response envelopes and return a list of parsed tool calls.
+
+Notes:
+
+- OpenAI tool call arguments are often a *string*; the library will apply JSON-ish repairs before parsing.
+- Gemini uses a different schema dialect; the library performs a best-effort conversion from JSON Schema.
+
+Python example:
+
+```python
+from llm_structured import (
+  build_openai_function_tool,
+  parse_openai_tool_calls_from_response,
+)
+
+schema = {
+  "type": "object",
+  "additionalProperties": False,
+  "required": ["id"],
+  "properties": {"id": {"type": "integer"}},
+}
+
+tool = build_openai_function_tool("get_user", "Get a user", schema)["tool"]
+print(tool)
+
+response = {
+  "choices": [
+    {
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "get_user", "arguments": "{'id': '123',}"},
+          }
+        ]
+      }
+    }
+  ]
+}
+
+calls = parse_openai_tool_calls_from_response(
+  response,
+  {"get_user": schema},
+  validation_repair={"coerce_types": True},
+  parse_repair={"allowSingleQuotes": True, "dropTrailingCommas": True},
+)
+
+assert calls[0]["ok"] is True
+assert calls[0]["validation"]["repaired_value"] == {"id": 123}
+```
+
+TypeScript example:
+
+```ts
+import {
+  buildOpenaiFunctionTool,
+  parseOpenaiToolCallsFromResponse,
+  type JsonSchema,
+} from "./src/index";
+
+const schema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id"],
+  properties: { id: { type: "integer" } },
+};
+
+const tool = buildOpenaiFunctionTool("get_user", "Get a user", schema).tool;
+console.log(tool);
+
+const response = {
+  choices: [
+    {
+      message: {
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "get_user", arguments: "{'id':'123'}" },
+          },
+        ],
+      },
+    },
+  ],
+};
+
+const calls = parseOpenaiToolCallsFromResponse(
+  response as any,
+  { get_user: schema },
+  { coerceTypes: true },
+  { allowSingleQuotes: true }
+);
+
+console.log(calls[0].validation.repairedValue);
 ```
 
 ### Cross-language consistency + CLI

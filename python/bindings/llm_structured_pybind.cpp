@@ -499,6 +499,73 @@ PYBIND11_MODULE(_native, m) {
     return out;
   };
 
+  // ---- Function calling / tool use ----
+
+  auto ToolSchemaConfigFromPy = [](py::object obj) -> llm_structured::ToolSchemaConfig {
+    llm_structured::ToolSchemaConfig cfg;
+    if (obj.is_none()) return cfg;
+    py::dict d = obj.cast<py::dict>();
+    if (d.contains("strict_additional_properties")) {
+      cfg.strict_additional_properties = d["strict_additional_properties"].cast<bool>();
+    }
+    if (d.contains("wrap_non_object")) cfg.wrap_non_object = d["wrap_non_object"].cast<bool>();
+    return cfg;
+  };
+
+  auto ToolSchemaBuildResultToPy = [&](const llm_structured::ToolSchemaBuildResult& r) {
+    py::dict out;
+    out["tool"] = ToPy(r.tool);
+    py::list w;
+    for (const auto& s : r.warnings) w.append(py::str(s));
+    out["warnings"] = std::move(w);
+    return out;
+  };
+
+  auto ToolPlatformToPy = [](llm_structured::ToolPlatform p) -> py::str {
+    switch (p) {
+      case llm_structured::ToolPlatform::OpenAI:
+        return py::str("openai");
+      case llm_structured::ToolPlatform::Anthropic:
+        return py::str("anthropic");
+      case llm_structured::ToolPlatform::Gemini:
+        return py::str("gemini");
+    }
+    return py::str("unknown");
+  };
+
+  auto ToolCallResultToPy = [&](const llm_structured::ToolCallResult& r) {
+    py::dict out;
+    out["platform"] = ToolPlatformToPy(r.platform);
+    out["ok"] = r.ok;
+    out["id"] = py::str(r.id);
+    out["name"] = py::str(r.name);
+    out["arguments"] = ToPy(r.arguments);
+    out["fixed"] = py::str(r.fixed);
+    out["parse_metadata"] = RepairMetadataToPy(r.parse_metadata);
+    out["validation"] = ValidationRepairResultToPy(r.validation);
+    out["error"] = py::str(r.error);
+    return out;
+  };
+
+  auto SchemasByNameFromPy = [&](py::handle schemas_by_name) -> Json {
+    if (schemas_by_name.is_none()) {
+      return Json(JsonObject{});
+    }
+    if (!py::isinstance<py::dict>(schemas_by_name)) {
+      throw std::runtime_error("schemas_by_name must be a dict mapping tool name -> schema");
+    }
+    py::dict d = py::reinterpret_borrow<py::dict>(schemas_by_name);
+    JsonObject out;
+    for (auto item : d) {
+      if (!py::isinstance<py::str>(item.first)) {
+        throw std::runtime_error("schemas_by_name keys must be strings");
+      }
+      const std::string name = py::cast<std::string>(item.first);
+      out[name] = SchemaFromPy(item.second);
+    }
+    return Json(std::move(out));
+  };
+
   m.def("validate_with_repair", [ValidationRepairConfigFromPy, ValidationRepairResultToPy](
                                    py::handle value, py::handle schema, py::object config) {
     Json v;
@@ -524,6 +591,165 @@ PYBIND11_MODULE(_native, m) {
         py::arg("schema"),
         py::arg("config") = py::none(),
         py::arg("parse_repair") = py::none());
+
+    m.def("build_openai_function_tool", [ToolSchemaConfigFromPy, ToolSchemaBuildResultToPy](
+                   const std::string& name,
+                   const std::string& description,
+                   py::handle parameters_schema,
+                   py::object config) {
+      Json s = SchemaFromPy(parameters_schema);
+      auto cfg = ToolSchemaConfigFromPy(std::move(config));
+      auto r = llm_structured::build_openai_function_tool(name, description, s, cfg);
+      return ToolSchemaBuildResultToPy(r);
+    },
+      py::arg("name"),
+      py::arg("description") = "",
+      py::arg("parameters_schema") = py::dict(),
+      py::arg("config") = py::none());
+
+    m.def("build_anthropic_tool", [ToolSchemaConfigFromPy, ToolSchemaBuildResultToPy](
+                 const std::string& name,
+                 const std::string& description,
+                 py::handle input_schema,
+                 py::object config) {
+      Json s = SchemaFromPy(input_schema);
+      auto cfg = ToolSchemaConfigFromPy(std::move(config));
+      auto r = llm_structured::build_anthropic_tool(name, description, s, cfg);
+      return ToolSchemaBuildResultToPy(r);
+    },
+      py::arg("name"),
+      py::arg("description") = "",
+      py::arg("input_schema") = py::dict(),
+      py::arg("config") = py::none());
+
+    m.def("build_gemini_function_declaration", [ToolSchemaConfigFromPy, ToolSchemaBuildResultToPy](
+                  const std::string& name,
+                  const std::string& description,
+                  py::handle parameters_schema,
+                  py::object config) {
+      Json s = SchemaFromPy(parameters_schema);
+      auto cfg = ToolSchemaConfigFromPy(std::move(config));
+      auto r = llm_structured::build_gemini_function_declaration(name, description, s, cfg);
+      return ToolSchemaBuildResultToPy(r);
+    },
+      py::arg("name"),
+      py::arg("description") = "",
+      py::arg("parameters_schema") = py::dict(),
+      py::arg("config") = py::none());
+
+    m.def("parse_openai_tool_call",
+      [ValidationRepairConfigFromPy, ToolCallResultToPy](py::handle tool_call,
+                        py::handle parameters_schema,
+                        py::object validation_repair,
+                        py::object parse_repair) {
+        Json tc;
+        if (!FromPy(tool_call, tc)) throw std::runtime_error("tool_call must be JSON-serializable");
+        Json s = SchemaFromPy(parameters_schema);
+        auto vcfg = ValidationRepairConfigFromPy(std::move(validation_repair));
+        RepairConfig pr = RepairConfigFromPy(std::move(parse_repair));
+        auto r = llm_structured::parse_openai_tool_call(tc, s, vcfg, pr);
+        return ToolCallResultToPy(r);
+      },
+      py::arg("tool_call"),
+      py::arg("parameters_schema"),
+      py::arg("validation_repair") = py::none(),
+      py::arg("parse_repair") = py::none());
+
+    m.def("parse_anthropic_tool_use",
+      [ValidationRepairConfigFromPy, ToolCallResultToPy](py::handle tool_use,
+                        py::handle input_schema,
+                        py::object validation_repair,
+                        py::object parse_repair) {
+        Json tu;
+        if (!FromPy(tool_use, tu)) throw std::runtime_error("tool_use must be JSON-serializable");
+        Json s = SchemaFromPy(input_schema);
+        auto vcfg = ValidationRepairConfigFromPy(std::move(validation_repair));
+        RepairConfig pr = RepairConfigFromPy(std::move(parse_repair));
+        auto r = llm_structured::parse_anthropic_tool_use(tu, s, vcfg, pr);
+        return ToolCallResultToPy(r);
+      },
+      py::arg("tool_use"),
+      py::arg("input_schema"),
+      py::arg("validation_repair") = py::none(),
+      py::arg("parse_repair") = py::none());
+
+    m.def("parse_gemini_function_call",
+      [ValidationRepairConfigFromPy, ToolCallResultToPy](py::handle function_call,
+                        py::handle parameters_schema,
+                        py::object validation_repair,
+                        py::object parse_repair) {
+        Json fc;
+        if (!FromPy(function_call, fc)) throw std::runtime_error("function_call must be JSON-serializable");
+        Json s = SchemaFromPy(parameters_schema);
+        auto vcfg = ValidationRepairConfigFromPy(std::move(validation_repair));
+        RepairConfig pr = RepairConfigFromPy(std::move(parse_repair));
+        auto r = llm_structured::parse_gemini_function_call(fc, s, vcfg, pr);
+        return ToolCallResultToPy(r);
+      },
+      py::arg("function_call"),
+      py::arg("parameters_schema"),
+      py::arg("validation_repair") = py::none(),
+      py::arg("parse_repair") = py::none());
+
+    m.def("parse_openai_tool_calls_from_response",
+      [SchemasByNameFromPy, ValidationRepairConfigFromPy, ToolCallResultToPy](py::handle response,
+                            py::handle schemas_by_name,
+                            py::object validation_repair,
+                            py::object parse_repair) {
+        Json r;
+        if (!FromPy(response, r)) throw std::runtime_error("response must be JSON-serializable");
+        Json s = SchemasByNameFromPy(schemas_by_name);
+        auto vcfg = ValidationRepairConfigFromPy(std::move(validation_repair));
+        RepairConfig pr = RepairConfigFromPy(std::move(parse_repair));
+        auto calls = llm_structured::parse_openai_tool_calls_from_response(r, s, vcfg, pr);
+        py::list out;
+        for (const auto& c : calls) out.append(ToolCallResultToPy(c));
+        return out;
+      },
+      py::arg("response"),
+      py::arg("schemas_by_name"),
+      py::arg("validation_repair") = py::none(),
+      py::arg("parse_repair") = py::none());
+
+    m.def("parse_anthropic_tool_uses_from_response",
+      [SchemasByNameFromPy, ValidationRepairConfigFromPy, ToolCallResultToPy](py::handle response,
+                            py::handle schemas_by_name,
+                            py::object validation_repair,
+                            py::object parse_repair) {
+        Json r;
+        if (!FromPy(response, r)) throw std::runtime_error("response must be JSON-serializable");
+        Json s = SchemasByNameFromPy(schemas_by_name);
+        auto vcfg = ValidationRepairConfigFromPy(std::move(validation_repair));
+        RepairConfig pr = RepairConfigFromPy(std::move(parse_repair));
+        auto calls = llm_structured::parse_anthropic_tool_uses_from_response(r, s, vcfg, pr);
+        py::list out;
+        for (const auto& c : calls) out.append(ToolCallResultToPy(c));
+        return out;
+      },
+      py::arg("response"),
+      py::arg("schemas_by_name"),
+      py::arg("validation_repair") = py::none(),
+      py::arg("parse_repair") = py::none());
+
+    m.def("parse_gemini_function_calls_from_response",
+      [SchemasByNameFromPy, ValidationRepairConfigFromPy, ToolCallResultToPy](py::handle response,
+                            py::handle schemas_by_name,
+                            py::object validation_repair,
+                            py::object parse_repair) {
+        Json r;
+        if (!FromPy(response, r)) throw std::runtime_error("response must be JSON-serializable");
+        Json s = SchemasByNameFromPy(schemas_by_name);
+        auto vcfg = ValidationRepairConfigFromPy(std::move(validation_repair));
+        RepairConfig pr = RepairConfigFromPy(std::move(parse_repair));
+        auto calls = llm_structured::parse_gemini_function_calls_from_response(r, s, vcfg, pr);
+        py::list out;
+        for (const auto& c : calls) out.append(ToolCallResultToPy(c));
+        return out;
+      },
+      py::arg("response"),
+      py::arg("schemas_by_name"),
+      py::arg("validation_repair") = py::none(),
+      py::arg("parse_repair") = py::none());
 
   m.def("parse_and_validate_json", [](const std::string& text, py::handle schema) {
     Json s = SchemaFromPy(schema);
