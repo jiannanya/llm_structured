@@ -2122,6 +2122,2393 @@ KeyValue parse_and_validate_kv(const std::string& text, const Json& schema) {
   return kv;
 }
 
+// ---------------- YAML-ish extraction/parsing/validation ----------------
+
+std::string extract_yaml_candidate(const std::string& text) {
+  // Look for ```yaml or ```yml fenced blocks first
+  const std::string fence_yaml = "```yaml";
+  const std::string fence_yml = "```yml";
+  const std::string fence_close = "```";
+  
+  auto lines = split_lines(text);
+  
+  for (size_t i = 0; i < lines.size(); ++i) {
+    std::string trimmed = ltrim_copy(lines[i]);
+    if (trimmed.find(fence_yaml) == 0 || trimmed.find(fence_yml) == 0) {
+      std::string body;
+      for (size_t j = i + 1; j < lines.size(); ++j) {
+        std::string line_trim = ltrim_copy(lines[j]);
+        if (line_trim.find(fence_close) == 0) {
+          return body;
+        }
+        if (!body.empty()) body += "\n";
+        body += lines[j];
+      }
+      return body;
+    }
+  }
+  
+  // If no fence found, try to extract YAML-like content
+  // Look for lines with key: value or list items starting with -
+  std::string yaml_content;
+  bool found_yaml_pattern = false;
+  
+  for (const auto& line : lines) {
+    std::string trimmed = ltrim_copy(line);
+    if (trimmed.empty()) continue;
+    
+    // Check for YAML patterns: "key:" or "- " or document separator "---"
+    if (trimmed.find(':') != std::string::npos || 
+        trimmed.find("- ") == 0 || 
+        trimmed == "---") {
+      found_yaml_pattern = true;
+      if (!yaml_content.empty()) yaml_content += "\n";
+      yaml_content += line;
+    } else if (found_yaml_pattern && !trimmed.empty() && std::isspace(static_cast<unsigned char>(line[0]))) {
+      // Continue with indented lines if we've found YAML pattern
+      if (!yaml_content.empty()) yaml_content += "\n";
+      yaml_content += line;
+    } else if (found_yaml_pattern) {
+      // Stop if we hit non-YAML content
+      break;
+    }
+  }
+  
+  return found_yaml_pattern ? yaml_content : text;
+}
+
+std::vector<std::string> extract_yaml_candidates(const std::string& text) {
+  std::vector<std::string> candidates;
+  auto lines = split_lines(text);
+  
+  const std::string fence_yaml = "```yaml";
+  const std::string fence_yml = "```yml";
+  const std::string fence_close = "```";
+  
+  std::vector<bool> in_fence(lines.size(), false);
+  
+  // First pass: mark fenced regions
+  for (size_t i = 0; i < lines.size(); ++i) {
+    std::string trimmed = ltrim_copy(lines[i]);
+    if (trimmed.find(fence_yaml) == 0 || trimmed.find(fence_yml) == 0) {
+      std::string body;
+      for (size_t j = i + 1; j < lines.size(); ++j) {
+        std::string line_trim = ltrim_copy(lines[j]);
+        if (line_trim.find(fence_close) == 0) {
+          candidates.push_back(body);
+          for (size_t k = i; k <= j; ++k) in_fence[k] = true;
+          i = j;
+          break;
+        }
+        if (!body.empty()) body += "\n";
+        body += lines[j];
+      }
+    }
+  }
+  
+  // Second pass: look for YAML documents separated by ---
+  std::string current_doc;
+  bool in_yaml = false;
+  
+  for (size_t i = 0; i < lines.size(); ++i) {
+    if (in_fence[i]) continue;
+    
+    std::string trimmed = ltrim_copy(lines[i]);
+    
+    // YAML document separator
+    if (trimmed == "---" || trimmed == "---\n") {
+      if (in_yaml && !current_doc.empty()) {
+        candidates.push_back(current_doc);
+      }
+      current_doc.clear();
+      in_yaml = true;
+      continue;
+    }
+    
+    // Detect YAML-like patterns
+    if (trimmed.find(':') != std::string::npos || trimmed.find("- ") == 0) {
+      in_yaml = true;
+      if (!current_doc.empty()) current_doc += "\n";
+      current_doc += lines[i];
+    } else if (in_yaml && !trimmed.empty() && std::isspace(static_cast<unsigned char>(lines[i][0]))) {
+      if (!current_doc.empty()) current_doc += "\n";
+      current_doc += lines[i];
+    } else if (in_yaml && !trimmed.empty()) {
+      if (!current_doc.empty()) {
+        candidates.push_back(current_doc);
+        current_doc.clear();
+      }
+      in_yaml = false;
+    }
+  }
+  
+  if (in_yaml && !current_doc.empty()) {
+    candidates.push_back(current_doc);
+  }
+  
+  return candidates;
+}
+
+static std::string apply_yaml_repairs(const std::string& text, const YamlRepairConfig& cfg, YamlRepairMetadata& meta) {
+  std::string result = text;
+  
+  // Fix tabs to spaces
+  if (cfg.fix_tabs && result.find('\t') != std::string::npos) {
+    meta.fixed_tabs = true;
+    std::string fixed;
+    for (char c : result) {
+      if (c == '\t') {
+        fixed += "  "; // Convert tab to 2 spaces
+      } else {
+        fixed.push_back(c);
+      }
+    }
+    result = fixed;
+  }
+  
+  // Normalize indentation (ensure consistent 2-space indentation)
+  if (cfg.normalize_indentation) {
+    auto lines = split_lines(result);
+    std::string normalized;
+    bool changed = false;
+    
+    for (const auto& line : lines) {
+      if (line.empty()) {
+        normalized += "\n";
+        continue;
+      }
+      
+      size_t indent = 0;
+      while (indent < line.size() && std::isspace(static_cast<unsigned char>(line[indent]))) {
+        indent++;
+      }
+      
+      // Check if indentation is not a multiple of 2
+      if (indent > 0 && indent % 2 != 0) {
+        changed = true;
+        size_t normalized_indent = ((indent + 1) / 2) * 2;
+        normalized += std::string(normalized_indent, ' ') + line.substr(indent);
+      } else {
+        normalized += line;
+      }
+      normalized += "\n";
+    }
+    
+    if (changed) {
+      meta.normalized_indentation = true;
+      result = normalized;
+    }
+  }
+  
+  return result;
+}
+
+// Minimalist YAML parser (supports subset: scalars, lists, objects, no advanced features)
+static Json parse_yaml_value(const std::string& yaml_text);
+
+// Forward declaration for recursive parsing
+static Json parse_yaml_node(const std::vector<std::pair<int, std::string>>& content, size_t& idx, int parent_indent);
+
+static Json parse_yaml_node(const std::vector<std::pair<int, std::string>>& content, size_t& idx, int parent_indent) {
+  if (idx >= content.size()) return Json(nullptr);
+  
+  int indent = content[idx].first;
+  const std::string& line = content[idx].second;
+  
+  // List item
+  if (line.find("- ") == 0) {
+    JsonArray arr;
+    int list_indent = indent;
+    
+    while (idx < content.size() && content[idx].first >= list_indent) {
+      int cur_indent = content[idx].first;
+      const std::string& cur_line = content[idx].second;
+      if (cur_indent == list_indent && cur_line.find("- ") == 0) {
+        std::string item_text = cur_line.substr(2);
+        item_text = ltrim_copy(item_text);
+        
+        if (item_text.empty()) {
+          // Empty list item: "- " followed by nested content
+          idx++;
+          if (idx < content.size() && content[idx].first > list_indent) {
+            arr.push_back(parse_yaml_node(content, idx, list_indent + 2));
+          } else {
+            arr.push_back(Json(nullptr));
+          }
+        } else if (item_text.find(':') != std::string::npos) {
+          // List item starts with "- key: value" - this is an inline object
+          // We need to collect all properties at the same or greater indent level
+          JsonObject obj;
+          
+          // Parse the first key-value from the list item line
+          size_t colon_pos = item_text.find(':');
+          std::string key = item_text.substr(0, colon_pos);
+          std::string val = item_text.substr(colon_pos + 1);
+          key = ltrim_copy(key);
+          while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) key.pop_back();
+          val = ltrim_copy(val);
+          
+          // Calculate the virtual indent for subsequent properties
+          // "- name: Alice" means "name" starts at indent + 2
+          int item_obj_indent = list_indent + 2;
+          
+          if (val.empty()) {
+            // Value is nested
+            idx++;
+            if (idx < content.size() && content[idx].first > item_obj_indent) {
+              obj[key] = parse_yaml_node(content, idx, item_obj_indent);
+            } else {
+              obj[key] = Json(nullptr);
+            }
+          } else {
+            obj[key] = parse_yaml_value(val);
+            idx++;
+          }
+          
+          // Now parse any additional properties at the same virtual indent level
+          while (idx < content.size()) {
+            int next_indent = content[idx].first;
+            const std::string& next_line = content[idx].second;
+            
+            // Must be at the same indent as the object properties (item_obj_indent)
+            if (next_indent != item_obj_indent) break;
+            // Must not be a list item
+            if (next_line.find("- ") == 0) break;
+            // Must have a colon
+            size_t next_colon = next_line.find(':');
+            if (next_colon == std::string::npos) break;
+            
+            std::string next_key = next_line.substr(0, next_colon);
+            std::string next_val = next_line.substr(next_colon + 1);
+            next_key = ltrim_copy(next_key);
+            while (!next_key.empty() && std::isspace(static_cast<unsigned char>(next_key.back()))) next_key.pop_back();
+            next_val = ltrim_copy(next_val);
+            
+            if (next_val.empty()) {
+              idx++;
+              if (idx < content.size() && content[idx].first > next_indent) {
+                obj[next_key] = parse_yaml_node(content, idx, next_indent);
+              } else {
+                obj[next_key] = Json(nullptr);
+              }
+            } else {
+              obj[next_key] = parse_yaml_value(next_val);
+              idx++;
+            }
+          }
+          
+          arr.push_back(Json(obj));
+        } else {
+          // Simple scalar list item
+          idx++;
+          arr.push_back(parse_yaml_value(item_text));
+        }
+      } else {
+        break;
+      }
+    }
+    return Json(arr);
+  }
+  
+  // Object
+  if (line.find(':') != std::string::npos) {
+    JsonObject obj;
+    int obj_indent = indent;
+    
+    while (idx < content.size() && content[idx].first >= obj_indent) {
+      int cur_indent = content[idx].first;
+      const std::string& cur_line = content[idx].second;
+      if (cur_indent != obj_indent) break;
+      
+      size_t colon_pos = cur_line.find(':');
+      if (colon_pos == std::string::npos) break;
+      
+      std::string key = cur_line.substr(0, colon_pos);
+      key = ltrim_copy(key);
+      while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) key.pop_back();
+      
+      std::string value_part = cur_line.substr(colon_pos + 1);
+      value_part = ltrim_copy(value_part);
+      
+      idx++;
+      
+      if (value_part.empty()) {
+        // Multi-line value
+        if (idx < content.size() && content[idx].first > cur_indent) {
+          obj[key] = parse_yaml_node(content, idx, cur_indent);
+        } else {
+          obj[key] = Json(nullptr);
+        }
+      } else {
+        obj[key] = parse_yaml_value(value_part);
+      }
+    }
+    return Json(obj);
+  }
+  
+  // Scalar
+  idx++;
+  return parse_yaml_value(line);
+}
+
+static Json parse_yaml_impl(const std::string& text) {
+  auto lines = split_lines(text);
+  if (lines.empty()) return Json(nullptr);
+  
+  // Remove empty lines and trim
+  std::vector<std::pair<int, std::string>> content; // (indent, line)
+  for (const auto& line : lines) {
+    std::string trimmed = ltrim_copy(line);
+    if (trimmed.empty() || trimmed[0] == '#') continue;
+    
+    size_t indent = 0;
+    while (indent < line.size() && std::isspace(static_cast<unsigned char>(line[indent]))) {
+      indent++;
+    }
+    content.push_back({static_cast<int>(indent), trimmed});
+  }
+  
+  if (content.empty()) return Json(nullptr);
+  
+  size_t idx = 0;
+  return parse_yaml_node(content, idx, -1);
+}
+
+static Json parse_yaml_value(const std::string& yaml_text) {
+  std::string val = yaml_text;
+  
+  // Trim
+  while (!val.empty() && std::isspace(static_cast<unsigned char>(val.front()))) val.erase(0, 1);
+  while (!val.empty() && std::isspace(static_cast<unsigned char>(val.back()))) val.pop_back();
+  
+  if (val.empty()) return Json(nullptr);
+  
+  // YAML literals
+  if (val == "null" || val == "~") return Json(nullptr);
+  if (val == "true" || val == "True" || val == "TRUE") return Json(true);
+  if (val == "false" || val == "False" || val == "FALSE") return Json(false);
+  
+  // Quoted string
+  if ((val.front() == '"' && val.back() == '"') || 
+      (val.front() == '\'' && val.back() == '\'')) {
+    return Json(val.substr(1, val.size() - 2));
+  }
+  
+  // Number
+  char* end = nullptr;
+  double num = std::strtod(val.c_str(), &end);
+  if (end == val.c_str() + val.size()) {
+    return Json(num);
+  }
+  
+  // Inline JSON array or object
+  if ((val.front() == '[' && val.back() == ']') || 
+      (val.front() == '{' && val.back() == '}')) {
+    try {
+      return loads_jsonish(val);
+    } catch (...) {
+      // Fall through to string
+    }
+  }
+  
+  // Default: string
+  return Json(val);
+}
+
+Json loads_yamlish(const std::string& text) {
+  YamlRepairConfig cfg;
+  YamlRepairMetadata meta;
+  std::string candidate = extract_yaml_candidate(text);
+  meta.extracted_from_fence = (candidate != text);
+  std::string fixed = apply_yaml_repairs(candidate, cfg, meta);
+  return parse_yaml_impl(fixed);
+}
+
+YamlishParseResult loads_yamlish_ex(const std::string& text, const YamlRepairConfig& repair) {
+  YamlRepairMetadata meta;
+  std::string candidate = extract_yaml_candidate(text);
+  meta.extracted_from_fence = (candidate != text);
+  std::string fixed = apply_yaml_repairs(candidate, repair, meta);
+  Json value = parse_yaml_impl(fixed);
+  return {value, fixed, meta};
+}
+
+JsonArray loads_yamlish_all(const std::string& text) {
+  auto candidates = extract_yaml_candidates(text);
+  JsonArray result;
+  for (const auto& cand : candidates) {
+    result.push_back(loads_yamlish(cand));
+  }
+  return result;
+}
+
+YamlishParseAllResult loads_yamlish_all_ex(const std::string& text, const YamlRepairConfig& repair) {
+  auto candidates = extract_yaml_candidates(text);
+  YamlishParseAllResult result;
+  for (const auto& cand : candidates) {
+    auto r = loads_yamlish_ex(cand, repair);
+    result.values.push_back(r.value);
+    result.fixed.push_back(r.fixed);
+    result.metadata.push_back(r.metadata);
+  }
+  return result;
+}
+
+Json parse_and_validate_yaml(const std::string& text, const Json& schema) {
+  Json value = loads_yamlish(text);
+  validate(value, schema, "$");
+  return value;
+}
+
+YamlishParseResult parse_and_validate_yaml_ex(const std::string& text, const Json& schema, const YamlRepairConfig& repair) {
+  auto result = loads_yamlish_ex(text, repair);
+  validate(result.value, schema, "$");
+  return result;
+}
+
+JsonArray parse_and_validate_yaml_all(const std::string& text, const Json& schema) {
+  JsonArray values = loads_yamlish_all(text);
+  for (size_t i = 0; i < values.size(); ++i) {
+    validate(values[i], schema, "$[" + std::to_string(i) + "]");
+  }
+  return values;
+}
+
+YamlishParseAllResult parse_and_validate_yaml_all_ex(const std::string& text, const Json& schema, const YamlRepairConfig& repair) {
+  auto result = loads_yamlish_all_ex(text, repair);
+  for (size_t i = 0; i < result.values.size(); ++i) {
+    validate(result.values[i], schema, "$[" + std::to_string(i) + "]");
+  }
+  return result;
+}
+
+static std::string yaml_to_string_impl(const Json& v, int indent, int level, bool inline_mode);
+
+static std::string yaml_to_string_impl(const Json& v, int indent, int level, bool inline_mode) {
+  std::string ind(level * indent, ' ');
+  
+  if (v.is_null()) return "null";
+  if (v.is_bool()) return v.as_bool() ? "true" : "false";
+  if (v.is_number()) {
+    double num = v.as_number();
+    if (std::floor(num) == num && num >= -1e15 && num <= 1e15) {
+      return std::to_string(static_cast<int64_t>(num));
+    }
+    return std::to_string(num);
+  }
+  if (v.is_string()) {
+    const auto& s = v.as_string();
+    // Quote if contains special chars or looks like number/bool
+    if (s.empty() || s == "null" || s == "true" || s == "false" || 
+        s.find(':') != std::string::npos || s.find('#') != std::string::npos ||
+        s.find('\n') != std::string::npos) {
+      return "\"" + json_escape(s) + "\"";
+    }
+    char* end = nullptr;
+    std::strtod(s.c_str(), &end);
+    if (end == s.c_str() + s.size()) {
+      return "\"" + s + "\"";
+    }
+    return s;
+  }
+  if (v.is_array()) {
+    const auto& arr = v.as_array();
+    if (arr.empty()) return "[]";
+    
+    std::string result;
+    for (const auto& el : arr) {
+      result += ind + "- ";
+      if (el.is_object() || el.is_array()) {
+        result += "\n" + yaml_to_string_impl(el, indent, level + 1, false);
+      } else {
+        result += yaml_to_string_impl(el, indent, 0, true);
+      }
+      result += "\n";
+    }
+    return result.substr(0, result.size() - 1); // Remove trailing newline
+  }
+  if (v.is_object()) {
+    const auto& obj = v.as_object();
+    if (obj.empty()) return "{}";
+    
+    std::string result;
+    for (const auto& kv : obj) {
+      result += ind + kv.first + ": ";
+      if (kv.second.is_object() || kv.second.is_array()) {
+        result += "\n" + yaml_to_string_impl(kv.second, indent, level + 1, false);
+      } else {
+        result += yaml_to_string_impl(kv.second, indent, 0, true);
+      }
+      result += "\n";
+    }
+    return result.substr(0, result.size() - 1); // Remove trailing newline
+  }
+  return "null";
+}
+
+std::string dumps_yaml(const Json& value, int indent) {
+  return yaml_to_string_impl(value, indent, 0, false);
+}
+
+// ---------------- TOML extraction/parsing/validation ----------------
+
+std::string extract_toml_candidate(const std::string& text) {
+  // Try to find ```toml fenced block first
+  size_t fence_start = text.find("```toml");
+  if (fence_start == std::string::npos) {
+    fence_start = text.find("```TOML");
+  }
+  
+  if (fence_start != std::string::npos) {
+    size_t content_start = text.find('\n', fence_start);
+    if (content_start != std::string::npos) {
+      content_start++;
+      size_t fence_end = text.find("```", content_start);
+      if (fence_end != std::string::npos) {
+        return text.substr(content_start, fence_end - content_start);
+      }
+    }
+  }
+  
+  // Look for TOML-like structure: [section] or key = value patterns
+  std::string trimmed = text;
+  // Trim leading/trailing whitespace
+  size_t start = trimmed.find_first_not_of(" \t\n\r");
+  if (start == std::string::npos) return text;
+  size_t end = trimmed.find_last_not_of(" \t\n\r");
+  trimmed = trimmed.substr(start, end - start + 1);
+  
+  // Check if it looks like TOML (has [section] headers or key = value lines)
+  bool has_section = trimmed.find('[') != std::string::npos && trimmed.find(']') != std::string::npos;
+  bool has_assignment = trimmed.find(" = ") != std::string::npos || trimmed.find("= ") != std::string::npos;
+  
+  if (has_section || has_assignment) {
+    return trimmed;
+  }
+  
+  return text;
+}
+
+std::vector<std::string> extract_toml_candidates(const std::string& text) {
+  std::vector<std::string> results;
+  
+  // Find all ```toml fenced blocks
+  size_t pos = 0;
+  while (pos < text.size()) {
+    size_t fence_start = text.find("```toml", pos);
+    if (fence_start == std::string::npos) {
+      fence_start = text.find("```TOML", pos);
+    }
+    
+    if (fence_start == std::string::npos) break;
+    
+    size_t content_start = text.find('\n', fence_start);
+    if (content_start == std::string::npos) break;
+    content_start++;
+    
+    size_t fence_end = text.find("```", content_start);
+    if (fence_end == std::string::npos) break;
+    
+    results.push_back(text.substr(content_start, fence_end - content_start));
+    pos = fence_end + 3;
+  }
+  
+  // If no fenced blocks found, try to extract a single TOML document
+  if (results.empty()) {
+    std::string candidate = extract_toml_candidate(text);
+    if (!candidate.empty()) {
+      results.push_back(candidate);
+    }
+  }
+  
+  return results;
+}
+
+static std::string apply_toml_repairs(const std::string& text, const TomlRepairConfig& cfg, TomlRepairMetadata& meta) {
+  std::string result = text;
+  
+  // Normalize whitespace (tabs to spaces)
+  if (cfg.normalize_whitespace) {
+    std::string normalized;
+    bool changed = false;
+    for (char c : result) {
+      if (c == '\t') {
+        normalized += "  ";
+        changed = true;
+      } else {
+        normalized += c;
+      }
+    }
+    if (changed) {
+      result = normalized;
+      meta.normalized_whitespace = true;
+    }
+  }
+  
+  // Convert single quotes to double quotes (for string values)
+  if (cfg.allow_single_quotes) {
+    std::string converted;
+    bool in_double = false;
+    bool in_single = false;
+    bool changed = false;
+    
+    for (size_t i = 0; i < result.size(); ++i) {
+      char c = result[i];
+      
+      if (c == '"' && !in_single) {
+        in_double = !in_double;
+        converted += c;
+      } else if (c == '\'' && !in_double) {
+        // Convert single quote to double quote
+        converted += '"';
+        in_single = !in_single;
+        changed = true;
+      } else {
+        converted += c;
+      }
+    }
+    
+    if (changed) {
+      result = converted;
+      meta.converted_single_quotes = true;
+    }
+  }
+  
+  return result;
+}
+
+// Forward declarations for TOML parsing
+static Json parse_toml_value(const std::string& value_str);
+static Json parse_toml_inline_table(const std::string& text, size_t& pos);
+static Json parse_toml_inline_array(const std::string& text, size_t& pos);
+
+// Parse a TOML value (string, number, bool, array, inline table, datetime)
+static Json parse_toml_value(const std::string& value_str) {
+  std::string trimmed = value_str;
+  // Trim whitespace
+  size_t start = trimmed.find_first_not_of(" \t");
+  if (start == std::string::npos) return Json(nullptr);
+  size_t end = trimmed.find_last_not_of(" \t\r\n");
+  trimmed = trimmed.substr(start, end - start + 1);
+  
+  if (trimmed.empty()) return Json(nullptr);
+  
+  // Boolean
+  if (trimmed == "true") return Json(true);
+  if (trimmed == "false") return Json(false);
+  
+  // String (double-quoted)
+  if (trimmed.size() >= 2 && trimmed[0] == '"' && trimmed.back() == '"') {
+    std::string str = trimmed.substr(1, trimmed.size() - 2);
+    // Handle escape sequences
+    std::string unescaped;
+    for (size_t i = 0; i < str.size(); ++i) {
+      if (str[i] == '\\' && i + 1 < str.size()) {
+        switch (str[i + 1]) {
+          case 'n': unescaped += '\n'; ++i; break;
+          case 't': unescaped += '\t'; ++i; break;
+          case 'r': unescaped += '\r'; ++i; break;
+          case '\\': unescaped += '\\'; ++i; break;
+          case '"': unescaped += '"'; ++i; break;
+          default: unescaped += str[i]; break;
+        }
+      } else {
+        unescaped += str[i];
+      }
+    }
+    return Json(unescaped);
+  }
+  
+  // Multiline basic string
+  if (trimmed.size() >= 6 && trimmed.substr(0, 3) == "\"\"\"" && trimmed.substr(trimmed.size() - 3) == "\"\"\"") {
+    std::string str = trimmed.substr(3, trimmed.size() - 6);
+    // Remove leading newline if present
+    if (!str.empty() && str[0] == '\n') str = str.substr(1);
+    return Json(str);
+  }
+  
+  // Literal string (single-quoted, no escaping)
+  if (trimmed.size() >= 2 && trimmed[0] == '\'' && trimmed.back() == '\'') {
+    return Json(trimmed.substr(1, trimmed.size() - 2));
+  }
+  
+  // Multiline literal string
+  if (trimmed.size() >= 6 && trimmed.substr(0, 3) == "'''" && trimmed.substr(trimmed.size() - 3) == "'''") {
+    std::string str = trimmed.substr(3, trimmed.size() - 6);
+    if (!str.empty() && str[0] == '\n') str = str.substr(1);
+    return Json(str);
+  }
+  
+  // Inline table
+  if (trimmed[0] == '{') {
+    size_t pos = 0;
+    return parse_toml_inline_table(trimmed, pos);
+  }
+  
+  // Array
+  if (trimmed[0] == '[') {
+    size_t pos = 0;
+    return parse_toml_inline_array(trimmed, pos);
+  }
+  
+  // Integer (with optional underscores and prefixes)
+  {
+    std::string num_str = trimmed;
+    // Remove underscores
+    num_str.erase(std::remove(num_str.begin(), num_str.end(), '_'), num_str.end());
+    
+    // Check for hex, octal, binary
+    if (num_str.size() > 2 && num_str[0] == '0') {
+      if (num_str[1] == 'x' || num_str[1] == 'X') {
+        // Hex
+        try {
+          int64_t val = std::stoll(num_str.substr(2), nullptr, 16);
+          return Json(static_cast<double>(val));
+        } catch (...) {}
+      } else if (num_str[1] == 'o' || num_str[1] == 'O') {
+        // Octal
+        try {
+          int64_t val = std::stoll(num_str.substr(2), nullptr, 8);
+          return Json(static_cast<double>(val));
+        } catch (...) {}
+      } else if (num_str[1] == 'b' || num_str[1] == 'B') {
+        // Binary
+        try {
+          int64_t val = std::stoll(num_str.substr(2), nullptr, 2);
+          return Json(static_cast<double>(val));
+        } catch (...) {}
+      }
+    }
+    
+    // Try integer
+    try {
+      size_t processed;
+      int64_t ival = std::stoll(num_str, &processed);
+      if (processed == num_str.size()) {
+        return Json(static_cast<double>(ival));
+      }
+    } catch (...) {}
+    
+    // Try float (including inf, nan)
+    if (num_str == "inf" || num_str == "+inf") {
+      return Json(std::numeric_limits<double>::infinity());
+    }
+    if (num_str == "-inf") {
+      return Json(-std::numeric_limits<double>::infinity());
+    }
+    if (num_str == "nan" || num_str == "+nan" || num_str == "-nan") {
+      return Json(std::numeric_limits<double>::quiet_NaN());
+    }
+    
+    try {
+      size_t processed;
+      double dval = std::stod(num_str, &processed);
+      if (processed == num_str.size()) {
+        return Json(dval);
+      }
+    } catch (...) {}
+  }
+  
+  // Datetime (return as string for now)
+  // Check for ISO 8601 patterns
+  if (trimmed.size() >= 10 && std::isdigit(trimmed[0]) && trimmed[4] == '-' && trimmed[7] == '-') {
+    return Json(trimmed);
+  }
+  
+  // Time only
+  if (trimmed.size() >= 5 && std::isdigit(trimmed[0]) && trimmed[2] == ':') {
+    return Json(trimmed);
+  }
+  
+  // Unquoted string (be lenient)
+  return Json(trimmed);
+}
+
+static Json parse_toml_inline_table(const std::string& text, size_t& pos) {
+  JsonObject obj;
+  
+  if (pos >= text.size() || text[pos] != '{') return Json(obj);
+  ++pos; // skip '{'
+  
+  while (pos < text.size()) {
+    // Skip whitespace
+    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\n' || text[pos] == '\r')) {
+      ++pos;
+    }
+    
+    if (pos >= text.size() || text[pos] == '}') {
+      ++pos;
+      break;
+    }
+    
+    // Parse key
+    std::string key;
+    while (pos < text.size() && text[pos] != '=' && text[pos] != ' ' && text[pos] != '\t') {
+      if (text[pos] == '"') {
+        // Quoted key
+        ++pos;
+        while (pos < text.size() && text[pos] != '"') {
+          if (text[pos] == '\\' && pos + 1 < text.size()) {
+            key += text[pos + 1];
+            pos += 2;
+          } else {
+            key += text[pos++];
+          }
+        }
+        if (pos < text.size()) ++pos; // skip closing quote
+        break;
+      }
+      key += text[pos++];
+    }
+    
+    // Skip to '='
+    while (pos < text.size() && text[pos] != '=') ++pos;
+    if (pos < text.size()) ++pos; // skip '='
+    
+    // Skip whitespace
+    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t')) ++pos;
+    
+    // Parse value
+    std::string value_str;
+    int brace_depth = 0;
+    int bracket_depth = 0;
+    bool in_string = false;
+    char string_char = 0;
+    
+    while (pos < text.size()) {
+      char c = text[pos];
+      
+      if (!in_string) {
+        if (c == '"' || c == '\'') {
+          in_string = true;
+          string_char = c;
+          value_str += c;
+          ++pos;
+          continue;
+        }
+        if (c == '{') brace_depth++;
+        if (c == '}') {
+          if (brace_depth == 0) break;
+          brace_depth--;
+        }
+        if (c == '[') bracket_depth++;
+        if (c == ']') bracket_depth--;
+        if (c == ',' && brace_depth == 0 && bracket_depth == 0) {
+          ++pos;
+          break;
+        }
+      } else {
+        if (c == string_char && (value_str.empty() || value_str.back() != '\\')) {
+          in_string = false;
+        }
+      }
+      
+      value_str += c;
+      ++pos;
+    }
+    
+    if (!key.empty()) {
+      obj[key] = parse_toml_value(value_str);
+    }
+  }
+  
+  return Json(obj);
+}
+
+static Json parse_toml_inline_array(const std::string& text, size_t& pos) {
+  JsonArray arr;
+  
+  if (pos >= text.size() || text[pos] != '[') return Json(arr);
+  ++pos; // skip '['
+  
+  while (pos < text.size()) {
+    // Skip whitespace and newlines
+    while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\n' || text[pos] == '\r')) {
+      ++pos;
+    }
+    
+    if (pos >= text.size() || text[pos] == ']') {
+      ++pos;
+      break;
+    }
+    
+    // Parse element
+    std::string value_str;
+    int brace_depth = 0;
+    int bracket_depth = 0;
+    bool in_string = false;
+    char string_char = 0;
+    
+    while (pos < text.size()) {
+      char c = text[pos];
+      
+      if (!in_string) {
+        if (c == '"' || c == '\'') {
+          in_string = true;
+          string_char = c;
+          value_str += c;
+          ++pos;
+          continue;
+        }
+        if (c == '{') brace_depth++;
+        if (c == '}') brace_depth--;
+        if (c == '[') bracket_depth++;
+        if (c == ']') {
+          if (bracket_depth == 0) break;
+          bracket_depth--;
+        }
+        if (c == ',' && brace_depth == 0 && bracket_depth == 0) {
+          ++pos;
+          break;
+        }
+      } else {
+        if (c == string_char && (value_str.empty() || value_str.back() != '\\')) {
+          in_string = false;
+        }
+      }
+      
+      value_str += c;
+      ++pos;
+    }
+    
+    // Trim value
+    size_t start = value_str.find_first_not_of(" \t\n\r");
+    size_t end = value_str.find_last_not_of(" \t\n\r");
+    if (start != std::string::npos && end != std::string::npos) {
+      value_str = value_str.substr(start, end - start + 1);
+    }
+    
+    if (!value_str.empty()) {
+      arr.push_back(parse_toml_value(value_str));
+    }
+  }
+  
+  return Json(arr);
+}
+
+static Json parse_toml_impl(const std::string& text) {
+  JsonObject root;
+  JsonObject* current_table = &root;
+  std::string current_path;
+  bool in_array_of_tables = false;
+  
+  std::vector<std::string> lines;
+  std::istringstream iss(text);
+  std::string line;
+  while (std::getline(iss, line)) {
+    lines.push_back(line);
+  }
+  
+  // Accumulate multiline values
+  std::string accumulated_value;
+  std::string pending_key;
+  bool in_multiline_string = false;
+  bool in_multiline_array = false;
+  int array_bracket_depth = 0;
+  
+  for (size_t i = 0; i < lines.size(); ++i) {
+    line = lines[i];
+    
+    // Handle multiline string continuation
+    if (in_multiline_string) {
+      accumulated_value += "\n" + line;
+      // Check for closing quotes
+      if (accumulated_value.find("\"\"\"") != std::string::npos && 
+          accumulated_value.rfind("\"\"\"") > accumulated_value.find("\"\"\"") + 2) {
+        current_table->operator[](pending_key) = parse_toml_value(accumulated_value);
+        in_multiline_string = false;
+        accumulated_value.clear();
+        pending_key.clear();
+      } else if (accumulated_value.find("'''") != std::string::npos &&
+                 accumulated_value.rfind("'''") > accumulated_value.find("'''") + 2) {
+        current_table->operator[](pending_key) = parse_toml_value(accumulated_value);
+        in_multiline_string = false;
+        accumulated_value.clear();
+        pending_key.clear();
+      }
+      continue;
+    }
+    
+    // Handle multiline array continuation
+    if (in_multiline_array) {
+      accumulated_value += "\n" + line;
+      for (char c : line) {
+        if (c == '[') array_bracket_depth++;
+        else if (c == ']') array_bracket_depth--;
+      }
+      if (array_bracket_depth <= 0) {
+        current_table->operator[](pending_key) = parse_toml_value(accumulated_value);
+        in_multiline_array = false;
+        accumulated_value.clear();
+        pending_key.clear();
+      }
+      continue;
+    }
+    
+    // Trim whitespace
+    size_t start = line.find_first_not_of(" \t");
+    if (start == std::string::npos) continue;
+    size_t end = line.find_last_not_of(" \t\r\n");
+    line = line.substr(start, end - start + 1);
+    
+    // Skip empty lines and comments
+    if (line.empty() || line[0] == '#') continue;
+    
+    // Check for array of tables [[section]]
+    if (line.size() >= 4 && line[0] == '[' && line[1] == '[') {
+      size_t close = line.rfind("]]");
+      if (close != std::string::npos) {
+        std::string path = line.substr(2, close - 2);
+        // Trim the path
+        size_t ps = path.find_first_not_of(" \t");
+        size_t pe = path.find_last_not_of(" \t");
+        if (ps != std::string::npos && pe != std::string::npos) {
+          path = path.substr(ps, pe - ps + 1);
+        }
+        
+        // Navigate/create path and add array element
+        current_table = &root;
+        std::istringstream path_stream(path);
+        std::string segment;
+        std::vector<std::string> segments;
+        while (std::getline(path_stream, segment, '.')) {
+          // Handle quoted keys
+          size_t qs = segment.find_first_not_of(" \t\"");
+          size_t qe = segment.find_last_not_of(" \t\"");
+          if (qs != std::string::npos && qe != std::string::npos) {
+            segment = segment.substr(qs, qe - qs + 1);
+          }
+          segments.push_back(segment);
+        }
+        
+        for (size_t si = 0; si < segments.size(); ++si) {
+          const std::string& seg = segments[si];
+          if (si == segments.size() - 1) {
+            // Last segment: create or access array, add new table
+            if (current_table->find(seg) == current_table->end()) {
+              current_table->operator[](seg) = JsonArray{};
+            }
+            auto& arr = current_table->operator[](seg).as_array();
+            arr.push_back(JsonObject{});
+            current_table = &arr.back().as_object();
+          } else {
+            // Navigate to nested table
+            if (current_table->find(seg) == current_table->end()) {
+              current_table->operator[](seg) = JsonObject{};
+            }
+            Json& next = current_table->operator[](seg);
+            if (next.is_array()) {
+              // Get last element of array
+              current_table = &next.as_array().back().as_object();
+            } else {
+              current_table = &next.as_object();
+            }
+          }
+        }
+        current_path = path;
+        in_array_of_tables = true;
+        continue;
+      }
+    }
+    
+    // Check for table [section]
+    if (line[0] == '[' && (line.size() < 2 || line[1] != '[')) {
+      size_t close = line.find(']');
+      if (close != std::string::npos) {
+        std::string path = line.substr(1, close - 1);
+        // Trim the path
+        size_t ps = path.find_first_not_of(" \t");
+        size_t pe = path.find_last_not_of(" \t");
+        if (ps != std::string::npos && pe != std::string::npos) {
+          path = path.substr(ps, pe - ps + 1);
+        }
+        
+        // Navigate/create nested tables
+        current_table = &root;
+        std::istringstream path_stream(path);
+        std::string segment;
+        while (std::getline(path_stream, segment, '.')) {
+          // Handle quoted keys
+          size_t qs = segment.find_first_not_of(" \t\"");
+          size_t qe = segment.find_last_not_of(" \t\"");
+          if (qs != std::string::npos && qe != std::string::npos) {
+            segment = segment.substr(qs, qe - qs + 1);
+          }
+          
+          if (current_table->find(segment) == current_table->end()) {
+            current_table->operator[](segment) = JsonObject{};
+          }
+          Json& next = current_table->operator[](segment);
+          if (next.is_array()) {
+            // Navigate into the last element of an array of tables
+            current_table = &next.as_array().back().as_object();
+          } else {
+            current_table = &next.as_object();
+          }
+        }
+        current_path = path;
+        in_array_of_tables = false;
+        continue;
+      }
+    }
+    
+    // Key-value pair
+    size_t eq_pos = line.find('=');
+    if (eq_pos != std::string::npos) {
+      std::string key = line.substr(0, eq_pos);
+      std::string value = line.substr(eq_pos + 1);
+      
+      // Trim key
+      size_t ks = key.find_first_not_of(" \t");
+      size_t ke = key.find_last_not_of(" \t");
+      if (ks != std::string::npos && ke != std::string::npos) {
+        key = key.substr(ks, ke - ks + 1);
+      }
+      
+      // Remove quotes from key if present
+      if (key.size() >= 2 && key[0] == '"' && key.back() == '"') {
+        key = key.substr(1, key.size() - 2);
+      }
+      
+      // Trim value
+      size_t vs = value.find_first_not_of(" \t");
+      if (vs != std::string::npos) {
+        value = value.substr(vs);
+      }
+      
+      // Remove trailing comment (if not in string)
+      bool in_str = false;
+      char str_char = 0;
+      for (size_t ci = 0; ci < value.size(); ++ci) {
+        if (!in_str && (value[ci] == '"' || value[ci] == '\'')) {
+          in_str = true;
+          str_char = value[ci];
+        } else if (in_str && value[ci] == str_char && (ci == 0 || value[ci - 1] != '\\')) {
+          in_str = false;
+        } else if (!in_str && value[ci] == '#') {
+          value = value.substr(0, ci);
+          break;
+        }
+      }
+      
+      // Trim value again
+      ke = value.find_last_not_of(" \t\r\n");
+      if (ke != std::string::npos) {
+        value = value.substr(0, ke + 1);
+      }
+      
+      // Check for multiline string start
+      if ((value.substr(0, 3) == "\"\"\"" && value.find("\"\"\"", 3) == std::string::npos) ||
+          (value.substr(0, 3) == "'''" && value.find("'''", 3) == std::string::npos)) {
+        in_multiline_string = true;
+        accumulated_value = value;
+        pending_key = key;
+        continue;
+      }
+      
+      // Check for multiline array start
+      if (value[0] == '[') {
+        array_bracket_depth = 0;
+        for (char c : value) {
+          if (c == '[') array_bracket_depth++;
+          else if (c == ']') array_bracket_depth--;
+        }
+        if (array_bracket_depth > 0) {
+          in_multiline_array = true;
+          accumulated_value = value;
+          pending_key = key;
+          continue;
+        }
+      }
+      
+      // Handle dotted keys (e.g., a.b.c = value)
+      if (key.find('.') != std::string::npos) {
+        JsonObject* target = current_table;
+        std::istringstream key_stream(key);
+        std::string key_part;
+        std::vector<std::string> key_parts;
+        while (std::getline(key_stream, key_part, '.')) {
+          size_t kps = key_part.find_first_not_of(" \t\"");
+          size_t kpe = key_part.find_last_not_of(" \t\"");
+          if (kps != std::string::npos && kpe != std::string::npos) {
+            key_part = key_part.substr(kps, kpe - kps + 1);
+          }
+          key_parts.push_back(key_part);
+        }
+        
+        for (size_t ki = 0; ki < key_parts.size() - 1; ++ki) {
+          if (target->find(key_parts[ki]) == target->end()) {
+            target->operator[](key_parts[ki]) = JsonObject{};
+          }
+          target = &target->operator[](key_parts[ki]).as_object();
+        }
+        target->operator[](key_parts.back()) = parse_toml_value(value);
+      } else {
+        current_table->operator[](key) = parse_toml_value(value);
+      }
+    }
+  }
+  
+  return Json(root);
+}
+
+Json loads_tomlish(const std::string& text) {
+  TomlRepairConfig cfg;
+  TomlRepairMetadata meta;
+  std::string candidate = extract_toml_candidate(text);
+  meta.extracted_from_fence = (candidate != text);
+  std::string fixed = apply_toml_repairs(candidate, cfg, meta);
+  return parse_toml_impl(fixed);
+}
+
+TomlishParseResult loads_tomlish_ex(const std::string& text, const TomlRepairConfig& repair) {
+  TomlRepairMetadata meta;
+  std::string candidate = extract_toml_candidate(text);
+  meta.extracted_from_fence = (candidate != text);
+  std::string fixed = apply_toml_repairs(candidate, repair, meta);
+  Json value = parse_toml_impl(fixed);
+  return {value, fixed, meta};
+}
+
+JsonArray loads_tomlish_all(const std::string& text) {
+  auto candidates = extract_toml_candidates(text);
+  JsonArray result;
+  for (const auto& cand : candidates) {
+    result.push_back(loads_tomlish(cand));
+  }
+  return result;
+}
+
+TomlishParseAllResult loads_tomlish_all_ex(const std::string& text, const TomlRepairConfig& repair) {
+  auto candidates = extract_toml_candidates(text);
+  TomlishParseAllResult result;
+  for (const auto& cand : candidates) {
+    auto r = loads_tomlish_ex(cand, repair);
+    result.values.push_back(r.value);
+    result.fixed.push_back(r.fixed);
+    result.metadata.push_back(r.metadata);
+  }
+  return result;
+}
+
+Json parse_and_validate_toml(const std::string& text, const Json& schema) {
+  Json value = loads_tomlish(text);
+  validate(value, schema, "$");
+  return value;
+}
+
+TomlishParseResult parse_and_validate_toml_ex(const std::string& text, const Json& schema, const TomlRepairConfig& repair) {
+  auto result = loads_tomlish_ex(text, repair);
+  validate(result.value, schema, "$");
+  return result;
+}
+
+JsonArray parse_and_validate_toml_all(const std::string& text, const Json& schema) {
+  JsonArray values = loads_tomlish_all(text);
+  for (size_t i = 0; i < values.size(); ++i) {
+    validate(values[i], schema, "$[" + std::to_string(i) + "]");
+  }
+  return values;
+}
+
+TomlishParseAllResult parse_and_validate_toml_all_ex(const std::string& text, const Json& schema, const TomlRepairConfig& repair) {
+  auto result = loads_tomlish_all_ex(text, repair);
+  for (size_t i = 0; i < result.values.size(); ++i) {
+    validate(result.values[i], schema, "$[" + std::to_string(i) + "]");
+  }
+  return result;
+}
+
+static std::string toml_escape_string(const std::string& s) {
+  std::string result;
+  for (char c : s) {
+    switch (c) {
+      case '\n': result += "\\n"; break;
+      case '\t': result += "\\t"; break;
+      case '\r': result += "\\r"; break;
+      case '\\': result += "\\\\"; break;
+      case '"': result += "\\\""; break;
+      default: result += c; break;
+    }
+  }
+  return result;
+}
+
+static void dumps_toml_impl(const Json& value, const std::string& prefix, std::string& output, bool is_root);
+
+static void dumps_toml_impl(const Json& value, const std::string& prefix, std::string& output, bool is_root) {
+  if (!value.is_object()) {
+    // Non-object at root - just output as key-value if possible
+    return;
+  }
+  
+  const auto& obj = value.as_object();
+  
+  // First pass: output all non-table, non-array-of-tables values
+  for (const auto& kv : obj) {
+    const std::string& key = kv.first;
+    const Json& val = kv.second;
+    
+    // Skip nested tables and arrays of tables (handled later)
+    if (val.is_object()) continue;
+    if (val.is_array() && !val.as_array().empty() && val.as_array()[0].is_object()) continue;
+    
+    // Quote key if needed
+    std::string safe_key = key;
+    if (key.find(' ') != std::string::npos || key.find('.') != std::string::npos || 
+        key.find('#') != std::string::npos || key.find('=') != std::string::npos) {
+      safe_key = "\"" + toml_escape_string(key) + "\"";
+    }
+    
+    output += safe_key + " = ";
+    
+    if (val.is_null()) {
+      output += "\"\"";  // TOML has no null, use empty string
+    } else if (val.is_bool()) {
+      output += val.as_bool() ? "true" : "false";
+    } else if (val.is_number()) {
+      double num = val.as_number();
+      if (std::floor(num) == num && num >= -1e15 && num <= 1e15) {
+        output += std::to_string(static_cast<int64_t>(num));
+      } else {
+        output += std::to_string(num);
+      }
+    } else if (val.is_string()) {
+      output += "\"" + toml_escape_string(val.as_string()) + "\"";
+    } else if (val.is_array()) {
+      output += "[";
+      const auto& arr = val.as_array();
+      for (size_t i = 0; i < arr.size(); ++i) {
+        if (i > 0) output += ", ";
+        const Json& el = arr[i];
+        if (el.is_null()) {
+          output += "\"\"";
+        } else if (el.is_bool()) {
+          output += el.as_bool() ? "true" : "false";
+        } else if (el.is_number()) {
+          double num = el.as_number();
+          if (std::floor(num) == num && num >= -1e15 && num <= 1e15) {
+            output += std::to_string(static_cast<int64_t>(num));
+          } else {
+            output += std::to_string(num);
+          }
+        } else if (el.is_string()) {
+          output += "\"" + toml_escape_string(el.as_string()) + "\"";
+        }
+      }
+      output += "]";
+    }
+    output += "\n";
+  }
+  
+  // Second pass: output nested tables
+  for (const auto& kv : obj) {
+    const std::string& key = kv.first;
+    const Json& val = kv.second;
+    
+    if (val.is_object()) {
+      std::string new_prefix = prefix.empty() ? key : prefix + "." + key;
+      output += "\n[" + new_prefix + "]\n";
+      dumps_toml_impl(val, new_prefix, output, false);
+    }
+  }
+  
+  // Third pass: output arrays of tables
+  for (const auto& kv : obj) {
+    const std::string& key = kv.first;
+    const Json& val = kv.second;
+    
+    if (val.is_array() && !val.as_array().empty() && val.as_array()[0].is_object()) {
+      const auto& arr = val.as_array();
+      std::string new_prefix = prefix.empty() ? key : prefix + "." + key;
+      for (const auto& el : arr) {
+        output += "\n[[" + new_prefix + "]]\n";
+        dumps_toml_impl(el, new_prefix, output, false);
+      }
+    }
+  }
+}
+
+std::string dumps_toml(const Json& value) {
+  std::string output;
+  dumps_toml_impl(value, "", output, true);
+  // Trim leading newline if present
+  if (!output.empty() && output[0] == '\n') {
+    output = output.substr(1);
+  }
+  return output;
+}
+
+// ---------------- XML/HTML extraction/parsing/validation ----------------
+
+// HTML void elements (self-closing by default)
+static const std::set<std::string> html_void_elements = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr"
+};
+
+// HTML entities map
+static const std::map<std::string, std::string> html_entities = {
+    {"amp", "&"}, {"lt", "<"}, {"gt", ">"}, {"quot", "\""}, {"apos", "'"},
+    {"nbsp", "\xC2\xA0"}, {"copy", "\xC2\xA9"}, {"reg", "\xC2\xAE"},
+    {"trade", "\xE2\x84\xA2"}, {"euro", "\xE2\x82\xAC"}, {"pound", "\xC2\xA3"},
+    {"yen", "\xC2\xA5"}, {"cent", "\xC2\xA2"}, {"deg", "\xC2\xB0"},
+    {"plusmn", "\xC2\xB1"}, {"times", "\xC3\x97"}, {"divide", "\xC3\xB7"},
+    {"mdash", "\xE2\x80\x94"}, {"ndash", "\xE2\x80\x93"}, {"hellip", "\xE2\x80\xA6"},
+    {"laquo", "\xC2\xAB"}, {"raquo", "\xC2\xBB"}, {"ldquo", "\xE2\x80\x9C"},
+    {"rdquo", "\xE2\x80\x9D"}, {"lsquo", "\xE2\x80\x98"}, {"rsquo", "\xE2\x80\x99"}
+};
+
+static std::string decode_html_entity(const std::string& entity) {
+  // Named entity
+  auto it = html_entities.find(entity);
+  if (it != html_entities.end()) {
+    return it->second;
+  }
+  
+  // Numeric entity &#123; or &#x1F;
+  if (!entity.empty() && entity[0] == '#') {
+    try {
+      unsigned long code = 0;
+      if (entity.size() > 1 && (entity[1] == 'x' || entity[1] == 'X')) {
+        code = std::stoul(entity.substr(2), nullptr, 16);
+      } else {
+        code = std::stoul(entity.substr(1), nullptr, 10);
+      }
+      // Convert to UTF-8
+      std::string utf8;
+      if (code < 0x80) {
+        utf8 += static_cast<char>(code);
+      } else if (code < 0x800) {
+        utf8 += static_cast<char>(0xC0 | (code >> 6));
+        utf8 += static_cast<char>(0x80 | (code & 0x3F));
+      } else if (code < 0x10000) {
+        utf8 += static_cast<char>(0xE0 | (code >> 12));
+        utf8 += static_cast<char>(0x80 | ((code >> 6) & 0x3F));
+        utf8 += static_cast<char>(0x80 | (code & 0x3F));
+      } else if (code < 0x110000) {
+        utf8 += static_cast<char>(0xF0 | (code >> 18));
+        utf8 += static_cast<char>(0x80 | ((code >> 12) & 0x3F));
+        utf8 += static_cast<char>(0x80 | ((code >> 6) & 0x3F));
+        utf8 += static_cast<char>(0x80 | (code & 0x3F));
+      }
+      return utf8;
+    } catch (...) {
+      return "&" + entity + ";";
+    }
+  }
+  
+  return "&" + entity + ";";
+}
+
+static std::string decode_html_entities(const std::string& text) {
+  std::string result;
+  result.reserve(text.size());
+  
+  for (size_t i = 0; i < text.size(); ++i) {
+    if (text[i] == '&') {
+      size_t end = text.find(';', i + 1);
+      if (end != std::string::npos && end - i < 12) {
+        std::string entity = text.substr(i + 1, end - i - 1);
+        result += decode_html_entity(entity);
+        i = end;
+        continue;
+      }
+    }
+    result += text[i];
+  }
+  
+  return result;
+}
+
+std::string extract_xml_candidate(const std::string& text) {
+  // Try to find ```xml or ```html fenced block first
+  for (const char* fence : {"```xml", "```XML", "```html", "```HTML"}) {
+    size_t fence_start = text.find(fence);
+    if (fence_start != std::string::npos) {
+      size_t content_start = text.find('\n', fence_start);
+      if (content_start != std::string::npos) {
+        content_start++;
+        size_t fence_end = text.find("```", content_start);
+        if (fence_end != std::string::npos) {
+          return text.substr(content_start, fence_end - content_start);
+        }
+      }
+    }
+  }
+  
+  // Look for XML declaration or root element
+  size_t start = text.find("<?xml");
+  if (start == std::string::npos) {
+    start = text.find("<!DOCTYPE");
+  }
+  if (start == std::string::npos) {
+    // Find first < that starts a tag
+    for (size_t i = 0; i < text.size(); ++i) {
+      if (text[i] == '<' && i + 1 < text.size() && 
+          (std::isalpha(text[i + 1]) || text[i + 1] == '!' || text[i + 1] == '?')) {
+        start = i;
+        break;
+      }
+    }
+  }
+  
+  if (start == std::string::npos) return text;
+  
+  // Find the end - look for matching close or end of last tag
+  int depth = 0;
+  size_t end = start;
+  bool in_tag = false;
+  bool in_string = false;
+  char string_char = 0;
+  
+  for (size_t i = start; i < text.size(); ++i) {
+    char c = text[i];
+    
+    if (in_string) {
+      if (c == string_char) in_string = false;
+      continue;
+    }
+    
+    if (in_tag) {
+      if (c == '"' || c == '\'') {
+        in_string = true;
+        string_char = c;
+      } else if (c == '>') {
+        in_tag = false;
+        end = i + 1;
+      }
+      continue;
+    }
+    
+    if (c == '<') {
+      if (i + 1 < text.size()) {
+        if (text[i + 1] == '/') {
+          depth--;
+        } else if (text[i + 1] == '!' || text[i + 1] == '?') {
+          // Comment, doctype, or PI - don't change depth
+        } else if (std::isalpha(text[i + 1])) {
+          // Check for self-closing
+          size_t close = text.find('>', i);
+          if (close != std::string::npos && text[close - 1] != '/') {
+            depth++;
+          }
+        }
+      }
+      in_tag = true;
+    }
+    
+    if (depth <= 0 && end > start) break;
+  }
+  
+  return text.substr(start, end - start);
+}
+
+std::vector<std::string> extract_xml_candidates(const std::string& text) {
+  std::vector<std::string> results;
+  
+  // Find all ```xml or ```html fenced blocks
+  size_t pos = 0;
+  while (pos < text.size()) {
+    size_t fence_start = std::string::npos;
+    for (const char* fence : {"```xml", "```XML", "```html", "```HTML"}) {
+      size_t found = text.find(fence, pos);
+      if (found != std::string::npos && (fence_start == std::string::npos || found < fence_start)) {
+        fence_start = found;
+      }
+    }
+    
+    if (fence_start == std::string::npos) break;
+    
+    size_t content_start = text.find('\n', fence_start);
+    if (content_start == std::string::npos) break;
+    content_start++;
+    
+    size_t fence_end = text.find("```", content_start);
+    if (fence_end == std::string::npos) break;
+    
+    results.push_back(text.substr(content_start, fence_end - content_start));
+    pos = fence_end + 3;
+  }
+  
+  // If no fenced blocks found, try to extract a single XML/HTML document
+  if (results.empty()) {
+    std::string candidate = extract_xml_candidate(text);
+    if (!candidate.empty()) {
+      results.push_back(candidate);
+    }
+  }
+  
+  return results;
+}
+
+// Forward declarations
+static XmlNode parse_xml_node(const std::string& text, size_t& pos, const XmlRepairConfig& cfg, XmlRepairMetadata& meta);
+static void skip_whitespace(const std::string& text, size_t& pos);
+static std::string parse_xml_name(const std::string& text, size_t& pos);
+static std::string parse_xml_attribute_value(const std::string& text, size_t& pos, const XmlRepairConfig& cfg, XmlRepairMetadata& meta);
+
+static void skip_whitespace(const std::string& text, size_t& pos) {
+  while (pos < text.size() && std::isspace(text[pos])) ++pos;
+}
+
+static std::string parse_xml_name(const std::string& text, size_t& pos) {
+  std::string name;
+  while (pos < text.size()) {
+    char c = text[pos];
+    if (std::isalnum(c) || c == '_' || c == '-' || c == ':' || c == '.') {
+      name += c;
+      ++pos;
+    } else {
+      break;
+    }
+  }
+  return name;
+}
+
+static std::string parse_xml_attribute_value(const std::string& text, size_t& pos, const XmlRepairConfig& cfg, XmlRepairMetadata& meta) {
+  skip_whitespace(text, pos);
+  
+  if (pos >= text.size()) return "";
+  
+  char quote = text[pos];
+  if (quote == '"' || quote == '\'') {
+    ++pos;
+    std::string value;
+    while (pos < text.size() && text[pos] != quote) {
+      value += text[pos++];
+    }
+    if (pos < text.size()) ++pos; // Skip closing quote
+    if (cfg.decode_entities) {
+      std::string decoded = decode_html_entities(value);
+      if (decoded != value) meta.decoded_entities = true;
+      return decoded;
+    }
+    return value;
+  }
+  
+  // Unquoted attribute value (HTML-style)
+  if (cfg.fix_unquoted_attributes) {
+    meta.fixed_unquoted_attributes = true;
+    std::string value;
+    while (pos < text.size() && !std::isspace(text[pos]) && 
+           text[pos] != '>' && text[pos] != '/' && text[pos] != '=') {
+      value += text[pos++];
+    }
+    if (cfg.decode_entities) {
+      std::string decoded = decode_html_entities(value);
+      if (decoded != value) meta.decoded_entities = true;
+      return decoded;
+    }
+    return value;
+  }
+  
+  return "";
+}
+
+static XmlNode parse_xml_node(const std::string& text, size_t& pos, const XmlRepairConfig& cfg, XmlRepairMetadata& meta) {
+  skip_whitespace(text, pos);
+  
+  if (pos >= text.size()) {
+    XmlNode empty;
+    empty.type = XmlNode::Type::Text;
+    return empty;
+  }
+  
+  // Text node
+  if (text[pos] != '<') {
+    XmlNode node;
+    node.type = XmlNode::Type::Text;
+    while (pos < text.size() && text[pos] != '<') {
+      node.text += text[pos++];
+    }
+    if (cfg.decode_entities) {
+      std::string decoded = decode_html_entities(node.text);
+      if (decoded != node.text) {
+        meta.decoded_entities = true;
+        node.text = decoded;
+      }
+    }
+    if (cfg.normalize_whitespace) {
+      // Normalize whitespace
+      std::string normalized;
+      bool last_was_space = true;
+      for (char c : node.text) {
+        if (std::isspace(c)) {
+          if (!last_was_space) {
+            normalized += ' ';
+            last_was_space = true;
+          }
+        } else {
+          normalized += c;
+          last_was_space = false;
+        }
+      }
+      if (normalized != node.text) {
+        meta.normalized_whitespace = true;
+        node.text = normalized;
+      }
+    }
+    return node;
+  }
+  
+  // Check for special nodes
+  if (pos + 1 < text.size()) {
+    // Comment <!-- ... -->
+    if (text.substr(pos, 4) == "<!--") {
+      XmlNode node;
+      node.type = XmlNode::Type::Comment;
+      pos += 4;
+      size_t end = text.find("-->", pos);
+      if (end != std::string::npos) {
+        node.text = text.substr(pos, end - pos);
+        pos = end + 3;
+      } else {
+        node.text = text.substr(pos);
+        pos = text.size();
+      }
+      return node;
+    }
+    
+    // CDATA <![CDATA[ ... ]]>
+    if (text.substr(pos, 9) == "<![CDATA[") {
+      XmlNode node;
+      node.type = XmlNode::Type::CData;
+      pos += 9;
+      size_t end = text.find("]]>", pos);
+      if (end != std::string::npos) {
+        node.text = text.substr(pos, end - pos);
+        pos = end + 3;
+      } else {
+        node.text = text.substr(pos);
+        pos = text.size();
+      }
+      return node;
+    }
+    
+    // DOCTYPE <!DOCTYPE ...>
+    if (text.substr(pos, 9) == "<!DOCTYPE" || text.substr(pos, 9) == "<!doctype") {
+      XmlNode node;
+      node.type = XmlNode::Type::Doctype;
+      pos += 9;
+      int depth = 1;
+      while (pos < text.size() && depth > 0) {
+        if (text[pos] == '<') depth++;
+        else if (text[pos] == '>') depth--;
+        if (depth > 0) node.text += text[pos];
+        ++pos;
+      }
+      return node;
+    }
+    
+    // Processing instruction <?...?>
+    if (text[pos] == '<' && text[pos + 1] == '?') {
+      XmlNode node;
+      node.type = XmlNode::Type::ProcessingInstruction;
+      pos += 2;
+      node.name = parse_xml_name(text, pos);
+      skip_whitespace(text, pos);
+      size_t end = text.find("?>", pos);
+      if (end != std::string::npos) {
+        node.text = text.substr(pos, end - pos);
+        pos = end + 2;
+      } else {
+        node.text = text.substr(pos);
+        pos = text.size();
+      }
+      return node;
+    }
+    
+    // Closing tag </...> - shouldn't happen at top level, but handle gracefully
+    if (text[pos] == '<' && text[pos + 1] == '/') {
+      // Skip to end of closing tag
+      size_t end = text.find('>', pos);
+      if (end != std::string::npos) pos = end + 1;
+      XmlNode empty;
+      empty.type = XmlNode::Type::Text;
+      return empty;
+    }
+  }
+  
+  // Element node
+  XmlNode node;
+  node.type = XmlNode::Type::Element;
+  
+  ++pos; // Skip '<'
+  node.name = parse_xml_name(text, pos);
+  
+  if (cfg.lowercase_names) {
+    std::string lower = to_lower(node.name);
+    if (lower != node.name) {
+      meta.lowercased_names = true;
+      node.name = lower;
+    }
+  }
+  
+  // Parse attributes
+  while (pos < text.size()) {
+    skip_whitespace(text, pos);
+    
+    if (pos >= text.size()) break;
+    if (text[pos] == '>' || text[pos] == '/') break;
+    
+    std::string attr_name = parse_xml_name(text, pos);
+    if (attr_name.empty()) {
+      ++pos; // Skip unknown character
+      continue;
+    }
+    
+    if (cfg.lowercase_names) {
+      std::string lower = to_lower(attr_name);
+      if (lower != attr_name) {
+        meta.lowercased_names = true;
+        attr_name = lower;
+      }
+    }
+    
+    skip_whitespace(text, pos);
+    
+    std::string attr_value;
+    if (pos < text.size() && text[pos] == '=') {
+      ++pos; // Skip '='
+      attr_value = parse_xml_attribute_value(text, pos, cfg, meta);
+    } else {
+      // Boolean attribute (HTML-style)
+      attr_value = attr_name;
+    }
+    
+    node.attributes[attr_name] = attr_value;
+  }
+  
+  // Check for self-closing
+  skip_whitespace(text, pos);
+  if (pos < text.size() && text[pos] == '/') {
+    node.self_closing = true;
+    ++pos;
+    skip_whitespace(text, pos);
+    if (pos < text.size() && text[pos] == '>') ++pos;
+    return node;
+  }
+  
+  // Skip '>'
+  if (pos < text.size() && text[pos] == '>') ++pos;
+  
+  // HTML void elements
+  if (cfg.html_mode) {
+    std::string lower_name = to_lower(node.name);
+    if (html_void_elements.count(lower_name)) {
+      node.self_closing = true;
+      return node;
+    }
+  }
+  
+  // Parse children
+  std::string close_tag = "</" + node.name;
+  std::string close_tag_lower = "</" + to_lower(node.name);
+  
+  while (pos < text.size()) {
+    skip_whitespace(text, pos);
+    
+    // Check for closing tag
+    if (pos + close_tag.size() <= text.size()) {
+      std::string potential = text.substr(pos, close_tag.size());
+      if (potential == close_tag || to_lower(potential) == close_tag_lower) {
+        // Found closing tag
+        pos += close_tag.size();
+        // Skip to '>'
+        while (pos < text.size() && text[pos] != '>') ++pos;
+        if (pos < text.size()) ++pos;
+        return node;
+      }
+    }
+    
+    // Check for another closing tag (auto-close current)
+    if (pos + 2 <= text.size() && text[pos] == '<' && text[pos + 1] == '/') {
+      if (cfg.auto_close_tags) {
+        meta.auto_closed_tags = true;
+        meta.unclosed_tag_count++;
+      }
+      return node;
+    }
+    
+    // Parse child
+    if (pos < text.size()) {
+      XmlNode child = parse_xml_node(text, pos, cfg, meta);
+      if (child.type != XmlNode::Type::Text || !child.text.empty()) {
+        node.children.push_back(std::move(child));
+      }
+    }
+  }
+  
+  // End of input without closing tag
+  if (cfg.auto_close_tags) {
+    meta.auto_closed_tags = true;
+    meta.unclosed_tag_count++;
+  }
+  
+  return node;
+}
+
+static XmlNode parse_xml_impl(const std::string& text, const XmlRepairConfig& cfg, XmlRepairMetadata& meta) {
+  // Create a root container
+  XmlNode root;
+  root.type = XmlNode::Type::Element;
+  root.name = "#document";
+  
+  size_t pos = 0;
+  while (pos < text.size()) {
+    XmlNode node = parse_xml_node(text, pos, cfg, meta);
+    if (node.type == XmlNode::Type::Text && node.text.empty()) continue;
+    root.children.push_back(std::move(node));
+  }
+  
+  // If there's only one element child, return it as root
+  if (root.children.size() == 1 && root.children[0].type == XmlNode::Type::Element) {
+    return std::move(root.children[0]);
+  }
+  
+  return root;
+}
+
+XmlNode loads_xml(const std::string& text) {
+  XmlRepairConfig cfg;
+  XmlRepairMetadata meta;
+  std::string candidate = extract_xml_candidate(text);
+  meta.extracted_from_fence = (candidate != text);
+  return parse_xml_impl(candidate, cfg, meta);
+}
+
+XmlParseResult loads_xml_ex(const std::string& text, const XmlRepairConfig& repair) {
+  XmlRepairMetadata meta;
+  std::string candidate = extract_xml_candidate(text);
+  meta.extracted_from_fence = (candidate != text);
+  XmlNode root = parse_xml_impl(candidate, repair, meta);
+  return {root, candidate, meta};
+}
+
+XmlNode loads_html(const std::string& text) {
+  XmlRepairConfig cfg;
+  cfg.html_mode = true;
+  cfg.lowercase_names = true;
+  XmlRepairMetadata meta;
+  std::string candidate = extract_xml_candidate(text);
+  meta.extracted_from_fence = (candidate != text);
+  return parse_xml_impl(candidate, cfg, meta);
+}
+
+XmlParseResult loads_html_ex(const std::string& text, const XmlRepairConfig& repair) {
+  XmlRepairConfig cfg = repair;
+  cfg.html_mode = true;
+  XmlRepairMetadata meta;
+  std::string candidate = extract_xml_candidate(text);
+  meta.extracted_from_fence = (candidate != text);
+  XmlNode root = parse_xml_impl(candidate, cfg, meta);
+  return {root, candidate, meta};
+}
+
+Json xml_to_json(const XmlNode& node) {
+  JsonObject obj;
+  
+  switch (node.type) {
+    case XmlNode::Type::Text:
+      return Json(node.text);
+    case XmlNode::Type::Comment:
+      obj["#comment"] = node.text;
+      return Json(obj);
+    case XmlNode::Type::CData:
+      obj["#cdata"] = node.text;
+      return Json(obj);
+    case XmlNode::Type::ProcessingInstruction:
+      obj["#pi"] = node.name;
+      obj["#pi-data"] = node.text;
+      return Json(obj);
+    case XmlNode::Type::Doctype:
+      obj["#doctype"] = node.text;
+      return Json(obj);
+    case XmlNode::Type::Element:
+      break;
+  }
+  
+  obj["#name"] = node.name;
+  
+  if (!node.attributes.empty()) {
+    JsonObject attrs;
+    for (const auto& kv : node.attributes) {
+      attrs[kv.first] = kv.second;
+    }
+    obj["@"] = Json(attrs);
+  }
+  
+  if (!node.children.empty()) {
+    // Check if all children are text
+    bool all_text = true;
+    std::string text_content;
+    for (const auto& child : node.children) {
+      if (child.type == XmlNode::Type::Text) {
+        text_content += child.text;
+      } else {
+        all_text = false;
+        break;
+      }
+    }
+    
+    if (all_text) {
+      obj["#text"] = text_content;
+    } else {
+      JsonArray children;
+      for (const auto& child : node.children) {
+        children.push_back(xml_to_json(child));
+      }
+      obj["#children"] = Json(children);
+    }
+  }
+  
+  return Json(obj);
+}
+
+Json loads_xml_as_json(const std::string& text) {
+  XmlNode node = loads_xml(text);
+  return xml_to_json(node);
+}
+
+Json loads_html_as_json(const std::string& text) {
+  XmlNode node = loads_html(text);
+  return xml_to_json(node);
+}
+
+static std::string xml_escape(const std::string& s) {
+  std::string result;
+  for (char c : s) {
+    switch (c) {
+      case '&': result += "&amp;"; break;
+      case '<': result += "&lt;"; break;
+      case '>': result += "&gt;"; break;
+      case '"': result += "&quot;"; break;
+      case '\'': result += "&apos;"; break;
+      default: result += c; break;
+    }
+  }
+  return result;
+}
+
+static void dumps_xml_impl(const XmlNode& node, int indent, int level, std::string& output, bool is_html) {
+  std::string ind(level * indent, ' ');
+  
+  switch (node.type) {
+    case XmlNode::Type::Text:
+      output += xml_escape(node.text);
+      return;
+    case XmlNode::Type::Comment:
+      output += ind + "<!--" + node.text + "-->";
+      return;
+    case XmlNode::Type::CData:
+      output += ind + "<![CDATA[" + node.text + "]]>";
+      return;
+    case XmlNode::Type::ProcessingInstruction:
+      output += ind + "<?" + node.name + " " + node.text + "?>";
+      return;
+    case XmlNode::Type::Doctype:
+      output += ind + "<!DOCTYPE" + node.text + ">";
+      return;
+    case XmlNode::Type::Element:
+      break;
+  }
+  
+  if (node.name == "#document") {
+    for (const auto& child : node.children) {
+      dumps_xml_impl(child, indent, level, output, is_html);
+      if (child.type == XmlNode::Type::Element) output += "\n";
+    }
+    return;
+  }
+  
+  output += ind + "<" + node.name;
+  
+  for (const auto& kv : node.attributes) {
+    output += " " + kv.first + "=\"" + xml_escape(kv.second) + "\"";
+  }
+  
+  bool is_void = is_html && html_void_elements.count(to_lower(node.name));
+  
+  if (node.children.empty() || node.self_closing) {
+    if (is_html && is_void) {
+      output += ">";
+    } else if (is_html) {
+      output += "></" + node.name + ">";
+    } else {
+      output += "/>";
+    }
+    return;
+  }
+  
+  output += ">";
+  
+  // Check if only text children
+  bool only_text = true;
+  for (const auto& child : node.children) {
+    if (child.type != XmlNode::Type::Text) {
+      only_text = false;
+      break;
+    }
+  }
+  
+  if (only_text) {
+    for (const auto& child : node.children) {
+      output += xml_escape(child.text);
+    }
+  } else {
+    output += "\n";
+    for (const auto& child : node.children) {
+      dumps_xml_impl(child, indent, level + 1, output, is_html);
+      if (child.type != XmlNode::Type::Text) output += "\n";
+    }
+    output += ind;
+  }
+  
+  output += "</" + node.name + ">";
+}
+
+std::string dumps_xml(const XmlNode& node, int indent) {
+  std::string output;
+  dumps_xml_impl(node, indent, 0, output, false);
+  return output;
+}
+
+std::string dumps_html(const XmlNode& node, int indent) {
+  std::string output;
+  dumps_xml_impl(node, indent, 0, output, true);
+  return output;
+}
+
+std::string xml_text_content(const XmlNode& node) {
+  std::string result;
+  
+  if (node.type == XmlNode::Type::Text || node.type == XmlNode::Type::CData) {
+    return node.text;
+  }
+  
+  for (const auto& child : node.children) {
+    result += xml_text_content(child);
+  }
+  
+  return result;
+}
+
+std::string xml_get_attribute(const XmlNode& node, const std::string& name) {
+  auto it = node.attributes.find(name);
+  if (it != node.attributes.end()) {
+    return it->second;
+  }
+  // Try lowercase
+  std::string lower = to_lower(name);
+  it = node.attributes.find(lower);
+  if (it != node.attributes.end()) {
+    return it->second;
+  }
+  return "";
+}
+
+// Simple selector query (supports tag names, #id, .class)
+static void query_xml_impl(XmlNode& node, const std::string& selector, std::vector<XmlNode*>& results) {
+  if (node.type != XmlNode::Type::Element) return;
+  
+  bool match = false;
+  
+  if (selector.empty()) {
+    match = true;
+  } else if (selector[0] == '#') {
+    // ID selector
+    std::string id = selector.substr(1);
+    match = (xml_get_attribute(node, "id") == id);
+  } else if (selector[0] == '.') {
+    // Class selector
+    std::string cls = selector.substr(1);
+    std::string classes = xml_get_attribute(node, "class");
+    // Simple contains check
+    match = (classes.find(cls) != std::string::npos);
+  } else {
+    // Tag name selector
+    match = (node.name == selector || to_lower(node.name) == to_lower(selector));
+  }
+  
+  if (match) {
+    results.push_back(&node);
+  }
+  
+  for (auto& child : node.children) {
+    query_xml_impl(child, selector, results);
+  }
+}
+
+std::vector<XmlNode*> query_xml(XmlNode& root, const std::string& selector) {
+  std::vector<XmlNode*> results;
+  query_xml_impl(root, selector, results);
+  return results;
+}
+
+static void query_xml_impl_const(const XmlNode& node, const std::string& selector, std::vector<const XmlNode*>& results) {
+  if (node.type != XmlNode::Type::Element) return;
+  
+  bool match = false;
+  
+  if (selector.empty()) {
+    match = true;
+  } else if (selector[0] == '#') {
+    std::string id = selector.substr(1);
+    match = (xml_get_attribute(node, "id") == id);
+  } else if (selector[0] == '.') {
+    std::string cls = selector.substr(1);
+    std::string classes = xml_get_attribute(node, "class");
+    match = (classes.find(cls) != std::string::npos);
+  } else {
+    match = (node.name == selector || to_lower(node.name) == to_lower(selector));
+  }
+  
+  if (match) {
+    results.push_back(&node);
+  }
+  
+  for (const auto& child : node.children) {
+    query_xml_impl_const(child, selector, results);
+  }
+}
+
+std::vector<const XmlNode*> query_xml(const XmlNode& root, const std::string& selector) {
+  std::vector<const XmlNode*> results;
+  query_xml_impl_const(root, selector, results);
+  return results;
+}
+
+void validate_xml(const XmlNode& node, const Json& schema, const std::string& path) {
+  if (!schema.is_object()) return;
+  const auto& s = schema.as_object();
+  
+  // Validate element name
+  auto it = s.find("element");
+  if (it != s.end() && it->second.is_string()) {
+    if (node.name != it->second.as_string() && to_lower(node.name) != to_lower(it->second.as_string())) {
+      throw ValidationError("Expected element '" + it->second.as_string() + "' but got '" + node.name + "'", path, "schema");
+    }
+  }
+  
+  // Validate required attributes
+  it = s.find("requiredAttributes");
+  if (it != s.end() && it->second.is_array()) {
+    for (const auto& attr : it->second.as_array()) {
+      if (attr.is_string()) {
+        if (node.attributes.find(attr.as_string()) == node.attributes.end()) {
+          throw ValidationError("Missing required attribute '" + attr.as_string() + "'", path, "schema");
+        }
+      }
+    }
+  }
+  
+  // Validate attribute values
+  it = s.find("attributes");
+  if (it != s.end() && it->second.is_object()) {
+    for (const auto& kv : it->second.as_object()) {
+      auto attr_it = node.attributes.find(kv.first);
+      if (attr_it != node.attributes.end() && kv.second.is_object()) {
+        const auto& attr_schema = kv.second.as_object();
+        // Pattern validation
+        auto pattern_it = attr_schema.find("pattern");
+        if (pattern_it != attr_schema.end() && pattern_it->second.is_string()) {
+          std::regex re(pattern_it->second.as_string());
+          if (!std::regex_match(attr_it->second, re)) {
+            throw ValidationError("Attribute '" + kv.first + "' does not match pattern", path + "/@" + kv.first, "schema");
+          }
+        }
+        // Enum validation
+        auto enum_it = attr_schema.find("enum");
+        if (enum_it != attr_schema.end() && enum_it->second.is_array()) {
+          bool found = false;
+          for (const auto& val : enum_it->second.as_array()) {
+            if (val.is_string() && val.as_string() == attr_it->second) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            throw ValidationError("Attribute '" + kv.first + "' value not in allowed enum", path + "/@" + kv.first, "schema");
+          }
+        }
+      }
+    }
+  }
+  
+  // Validate children
+  it = s.find("children");
+  if (it != s.end() && it->second.is_object()) {
+    const auto& children_schema = it->second.as_object();
+    
+    // Min/max children
+    auto min_it = children_schema.find("minItems");
+    if (min_it != children_schema.end() && min_it->second.is_number()) {
+      size_t element_count = 0;
+      for (const auto& child : node.children) {
+        if (child.type == XmlNode::Type::Element) element_count++;
+      }
+      if (element_count < static_cast<size_t>(min_it->second.as_number())) {
+        throw ValidationError("Too few child elements", path, "limit");
+      }
+    }
+    
+    auto max_it = children_schema.find("maxItems");
+    if (max_it != children_schema.end() && max_it->second.is_number()) {
+      size_t element_count = 0;
+      for (const auto& child : node.children) {
+        if (child.type == XmlNode::Type::Element) element_count++;
+      }
+      if (element_count > static_cast<size_t>(max_it->second.as_number())) {
+        throw ValidationError("Too many child elements", path, "limit");
+      }
+    }
+    
+    // Required children
+    auto required_it = children_schema.find("required");
+    if (required_it != children_schema.end() && required_it->second.is_array()) {
+      for (const auto& req : required_it->second.as_array()) {
+        if (!req.is_string()) continue;
+        bool found = false;
+        for (const auto& child : node.children) {
+          if (child.type == XmlNode::Type::Element && 
+              (child.name == req.as_string() || to_lower(child.name) == to_lower(req.as_string()))) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          throw ValidationError("Missing required child element '" + req.as_string() + "'", path, "schema");
+        }
+      }
+    }
+  }
+  
+  // Recursively validate child elements
+  it = s.find("childSchema");
+  if (it != s.end() && it->second.is_object()) {
+    size_t idx = 0;
+    for (const auto& child : node.children) {
+      if (child.type == XmlNode::Type::Element) {
+        validate_xml(child, it->second, path + "/" + child.name + "[" + std::to_string(idx) + "]");
+        idx++;
+      }
+    }
+  }
+}
+
+XmlNode parse_and_validate_xml(const std::string& text, const Json& schema) {
+  XmlNode node = loads_xml(text);
+  validate_xml(node, schema, "$");
+  return node;
+}
+
+XmlParseResult parse_and_validate_xml_ex(const std::string& text, const Json& schema, const XmlRepairConfig& repair) {
+  auto result = loads_xml_ex(text, repair);
+  validate_xml(result.root, schema, "$");
+  return result;
+}
+
 // ---------------- SQL extraction/parsing/validation ----------------
 
 static std::string strip_sql_strings_and_comments(const std::string& sql, bool& has_comments) {
@@ -3185,6 +5572,445 @@ StreamOutcome<JsonArray> JsonStreamValidatedBatchCollector::poll() {
 }
 
 StreamLocation JsonStreamValidatedBatchCollector::location() const { return compute_location_from_buffer(buf_); }
+
+// ---------------- Schema Inference Implementation ----------------
+
+namespace {
+
+// Helper to detect string formats
+std::string detect_string_format(const std::string& s) {
+  // ISO 8601 date-time: 2024-01-15T10:30:00Z or 2024-01-15T10:30:00+08:00
+  static const std::regex datetime_regex(R"(^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$)");
+  if (std::regex_match(s, datetime_regex)) return "date-time";
+  
+  // ISO 8601 date: 2024-01-15
+  static const std::regex date_regex(R"(^\d{4}-\d{2}-\d{2}$)");
+  if (std::regex_match(s, date_regex)) return "date";
+  
+  // ISO 8601 time: 10:30:00 or 10:30:00.123
+  static const std::regex time_regex(R"(^\d{2}:\d{2}:\d{2}(\.\d+)?$)");
+  if (std::regex_match(s, time_regex)) return "time";
+  
+  // Email (simplified)
+  static const std::regex email_regex(R"(^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$)");
+  if (std::regex_match(s, email_regex)) return "email";
+  
+  // URI
+  static const std::regex uri_regex(R"(^(https?|ftp|mailto|file|data)://[^\s]+$)");
+  if (std::regex_match(s, uri_regex)) return "uri";
+  
+  // UUID
+  static const std::regex uuid_regex(R"(^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$)");
+  if (std::regex_match(s, uuid_regex)) return "uuid";
+  
+  // IPv4
+  static const std::regex ipv4_regex(R"(^(\d{1,3}\.){3}\d{1,3}$)");
+  if (std::regex_match(s, ipv4_regex)) return "ipv4";
+  
+  // Hostname
+  static const std::regex hostname_regex(R"(^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$)");
+  if (std::regex_match(s, hostname_regex) && s.find('.') != std::string::npos) return "hostname";
+  
+  return "";
+}
+
+// Helper to get type name from Json value
+std::string get_json_type(const Json& v) {
+  if (v.is_null()) return "null";
+  if (v.is_bool()) return "boolean";
+  if (v.is_number()) {
+    double d = v.as_number();
+    if (d == std::floor(d) && std::abs(d) <= 9007199254740992.0) return "integer";
+    return "number";
+  }
+  if (v.is_string()) return "string";
+  if (v.is_array()) return "array";
+  if (v.is_object()) return "object";
+  return "null";
+}
+
+// Forward declaration
+Json infer_schema_internal(const Json& value, const SchemaInferenceConfig& config, std::map<std::string, std::set<std::string>>& enum_candidates);
+
+Json infer_array_schema(const JsonArray& arr, const SchemaInferenceConfig& config, std::map<std::string, std::set<std::string>>& enum_candidates) {
+  JsonObject schema_obj;
+  schema_obj["type"] = Json("array");
+  
+  if (arr.empty()) {
+    schema_obj["items"] = Json(JsonObject{});
+    return Json(schema_obj);
+  }
+  
+  // Infer items schema from all array elements
+  Json items_schema;
+  bool first = true;
+  for (const auto& item : arr) {
+    Json item_schema = infer_schema_internal(item, config, enum_candidates);
+    if (first) {
+      items_schema = item_schema;
+      first = false;
+    } else {
+      // Merge schemas
+      items_schema = merge_schemas(items_schema, item_schema, config);
+    }
+  }
+  schema_obj["items"] = items_schema;
+  
+  if (config.infer_array_lengths) {
+    schema_obj["minItems"] = Json(static_cast<double>(arr.size()));
+    schema_obj["maxItems"] = Json(static_cast<double>(arr.size()));
+  }
+  
+  return Json(schema_obj);
+}
+
+Json infer_object_schema(const JsonObject& obj, const SchemaInferenceConfig& config, std::map<std::string, std::set<std::string>>& enum_candidates) {
+  JsonObject schema_obj;
+  schema_obj["type"] = Json("object");
+  
+  JsonObject properties;
+  JsonArray required;
+  
+  for (const auto& [key, value] : obj) {
+    properties[key] = infer_schema_internal(value, config, enum_candidates);
+    if (config.required_by_default) {
+      required.push_back(Json(key));
+    }
+  }
+  
+  schema_obj["properties"] = Json(properties);
+  if (!required.empty()) {
+    schema_obj["required"] = Json(required);
+  }
+  if (config.strict_additional_properties) {
+    schema_obj["additionalProperties"] = Json(false);
+  }
+  
+  return Json(schema_obj);
+}
+
+Json infer_schema_internal(const Json& value, const SchemaInferenceConfig& config, std::map<std::string, std::set<std::string>>& enum_candidates) {
+  JsonObject schema_obj;
+  
+  if (value.is_null()) {
+    schema_obj["type"] = Json("null");
+  } else if (value.is_bool()) {
+    schema_obj["type"] = Json("boolean");
+    if (config.include_default) {
+      schema_obj["default"] = value;
+    }
+  } else if (value.is_number()) {
+    double d = value.as_number();
+    bool is_int = (d == std::floor(d) && std::abs(d) <= 9007199254740992.0);
+    
+    if (config.prefer_integer && is_int) {
+      schema_obj["type"] = Json("integer");
+    } else {
+      schema_obj["type"] = Json("number");
+    }
+    
+    if (config.include_default) {
+      schema_obj["default"] = value;
+    }
+    if (config.infer_numeric_ranges) {
+      schema_obj["minimum"] = value;
+      schema_obj["maximum"] = value;
+    }
+  } else if (value.is_string()) {
+    schema_obj["type"] = Json("string");
+    const std::string& s = value.as_string();
+    
+    if (config.infer_formats) {
+      std::string fmt = detect_string_format(s);
+      if (!fmt.empty()) {
+        schema_obj["format"] = Json(fmt);
+      }
+    }
+    
+    if (config.include_default) {
+      schema_obj["default"] = value;
+    }
+    if (config.infer_string_lengths) {
+      schema_obj["minLength"] = Json(static_cast<double>(s.length()));
+      schema_obj["maxLength"] = Json(static_cast<double>(s.length()));
+    }
+    if (config.include_examples) {
+      schema_obj["examples"] = Json(JsonArray{value});
+    }
+  } else if (value.is_array()) {
+    return infer_array_schema(value.as_array(), config, enum_candidates);
+  } else if (value.is_object()) {
+    return infer_object_schema(value.as_object(), config, enum_candidates);
+  }
+  
+  return Json(schema_obj);
+}
+
+// Merge two type strings or arrays
+Json merge_types(const Json& t1, const Json& t2) {
+  std::set<std::string> types;
+  
+  auto add_type = [&](const Json& t) {
+    if (t.is_string()) {
+      types.insert(t.as_string());
+    } else if (t.is_array()) {
+      for (const auto& item : t.as_array()) {
+        if (item.is_string()) types.insert(item.as_string());
+      }
+    }
+  };
+  
+  add_type(t1);
+  add_type(t2);
+  
+  // integer is a subset of number
+  if (types.count("integer") && types.count("number")) {
+    types.erase("integer");
+  }
+  
+  if (types.size() == 1) {
+    return Json(*types.begin());
+  }
+  
+  JsonArray arr;
+  for (const auto& t : types) {
+    arr.push_back(Json(t));
+  }
+  return Json(arr);
+}
+
+}  // anonymous namespace
+
+Json infer_schema(const Json& value, const SchemaInferenceConfig& config) {
+  std::map<std::string, std::set<std::string>> enum_candidates;
+  Json schema = infer_schema_internal(value, config, enum_candidates);
+  return schema;
+}
+
+Json infer_schema_from_values(const JsonArray& values, const SchemaInferenceConfig& config) {
+  if (values.empty()) {
+    return Json(JsonObject{});
+  }
+  
+  if (values.size() == 1) {
+    return infer_schema(values[0], config);
+  }
+  
+  // Infer schema from first value, then merge with others
+  Json schema = infer_schema(values[0], config);
+  for (size_t i = 1; i < values.size(); ++i) {
+    Json other = infer_schema(values[i], config);
+    schema = merge_schemas(schema, other, config);
+  }
+  
+  // Detect enums after merging
+  if (config.detect_enums) {
+    // Check if all values were strings and form a small set
+    std::set<std::string> string_values;
+    bool all_strings = true;
+    for (const auto& v : values) {
+      if (v.is_string()) {
+        string_values.insert(v.as_string());
+      } else {
+        all_strings = false;
+        break;
+      }
+    }
+    
+    if (all_strings && string_values.size() <= static_cast<size_t>(config.max_enum_values) && string_values.size() < values.size()) {
+      // Convert to enum
+      JsonArray enum_arr;
+      for (const auto& s : string_values) {
+        enum_arr.push_back(Json(s));
+      }
+      if (schema.is_object()) {
+        JsonObject schema_obj = schema.as_object();
+        schema_obj["enum"] = Json(enum_arr);
+        return Json(schema_obj);
+      }
+    }
+  }
+  
+  return schema;
+}
+
+Json merge_schemas(const Json& schema1, const Json& schema2, const SchemaInferenceConfig& config) {
+  // If either is empty, return the other
+  if (!schema1.is_object() || schema1.as_object().empty()) return schema2;
+  if (!schema2.is_object() || schema2.as_object().empty()) return schema1;
+  
+  const JsonObject& s1 = schema1.as_object();
+  const JsonObject& s2 = schema2.as_object();
+  
+  // Get types
+  Json type1 = s1.count("type") ? s1.at("type") : Json();
+  Json type2 = s2.count("type") ? s2.at("type") : Json();
+  
+  std::string t1_str = type1.is_string() ? type1.as_string() : "";
+  std::string t2_str = type2.is_string() ? type2.as_string() : "";
+  
+  // Same type - merge type-specific constraints
+  if (t1_str == t2_str && !t1_str.empty()) {
+    JsonObject res;
+    res["type"] = type1;
+    
+    if (t1_str == "object") {
+      // Merge properties
+      JsonObject merged_props;
+      std::set<std::string> all_keys;
+      
+      const JsonObject* props1 = s1.count("properties") && s1.at("properties").is_object() 
+                                  ? &s1.at("properties").as_object() : nullptr;
+      const JsonObject* props2 = s2.count("properties") && s2.at("properties").is_object() 
+                                  ? &s2.at("properties").as_object() : nullptr;
+      
+      if (props1) for (const auto& [k, v] : *props1) all_keys.insert(k);
+      if (props2) for (const auto& [k, v] : *props2) all_keys.insert(k);
+      
+      for (const auto& key : all_keys) {
+        bool in1 = props1 && props1->count(key);
+        bool in2 = props2 && props2->count(key);
+        
+        if (in1 && in2) {
+          merged_props[key] = merge_schemas(props1->at(key), props2->at(key), config);
+        } else if (in1) {
+          merged_props[key] = props1->at(key);
+        } else {
+          merged_props[key] = props2->at(key);
+        }
+      }
+      res["properties"] = Json(merged_props);
+      
+      // Merge required - intersection if both present, otherwise keep what exists
+      std::set<std::string> req1, req2;
+      if (s1.count("required") && s1.at("required").is_array()) {
+        for (const auto& r : s1.at("required").as_array()) {
+          if (r.is_string()) req1.insert(r.as_string());
+        }
+      }
+      if (s2.count("required") && s2.at("required").is_array()) {
+        for (const auto& r : s2.at("required").as_array()) {
+          if (r.is_string()) req2.insert(r.as_string());
+        }
+      }
+      
+      // Intersection of required fields
+      std::set<std::string> required_intersection;
+      for (const auto& r : req1) {
+        if (req2.count(r)) required_intersection.insert(r);
+      }
+      
+      if (!required_intersection.empty()) {
+        JsonArray req_arr;
+        for (const auto& r : required_intersection) {
+          req_arr.push_back(Json(r));
+        }
+        res["required"] = Json(req_arr);
+      }
+      
+      if (config.strict_additional_properties) {
+        res["additionalProperties"] = Json(false);
+      }
+    } else if (t1_str == "array") {
+      // Merge items schemas
+      if (s1.count("items") && s2.count("items")) {
+        res["items"] = merge_schemas(s1.at("items"), s2.at("items"), config);
+      } else if (s1.count("items")) {
+        res["items"] = s1.at("items");
+      } else if (s2.count("items")) {
+        res["items"] = s2.at("items");
+      }
+      
+      // Merge array length constraints - take min of mins, max of maxes
+      if (config.infer_array_lengths) {
+        double min1 = s1.count("minItems") && s1.at("minItems").is_number() ? s1.at("minItems").as_number() : 0;
+        double min2 = s2.count("minItems") && s2.at("minItems").is_number() ? s2.at("minItems").as_number() : 0;
+        double max1 = s1.count("maxItems") && s1.at("maxItems").is_number() ? s1.at("maxItems").as_number() : 1e9;
+        double max2 = s2.count("maxItems") && s2.at("maxItems").is_number() ? s2.at("maxItems").as_number() : 1e9;
+        
+        res["minItems"] = Json(std::min(min1, min2));
+        res["maxItems"] = Json(std::max(max1, max2));
+      }
+    } else if (t1_str == "string") {
+      // Merge string constraints
+      if (config.infer_string_lengths) {
+        double min1 = s1.count("minLength") && s1.at("minLength").is_number() ? s1.at("minLength").as_number() : 0;
+        double min2 = s2.count("minLength") && s2.at("minLength").is_number() ? s2.at("minLength").as_number() : 0;
+        double max1 = s1.count("maxLength") && s1.at("maxLength").is_number() ? s1.at("maxLength").as_number() : 1e9;
+        double max2 = s2.count("maxLength") && s2.at("maxLength").is_number() ? s2.at("maxLength").as_number() : 1e9;
+        
+        res["minLength"] = Json(std::min(min1, min2));
+        res["maxLength"] = Json(std::max(max1, max2));
+      }
+      
+      // Keep format only if both have the same format
+      if (s1.count("format") && s2.count("format") && 
+          s1.at("format").is_string() && s2.at("format").is_string() &&
+          s1.at("format").as_string() == s2.at("format").as_string()) {
+        res["format"] = s1.at("format");
+      }
+      
+      // Merge examples
+      if (config.include_examples) {
+        std::set<std::string> examples;
+        auto add_examples = [&](const JsonObject& s) {
+          if (s.count("examples") && s.at("examples").is_array()) {
+            for (const auto& ex : s.at("examples").as_array()) {
+              if (ex.is_string() && examples.size() < static_cast<size_t>(config.max_examples)) {
+                examples.insert(ex.as_string());
+              }
+            }
+          }
+        };
+        add_examples(s1);
+        add_examples(s2);
+        
+        if (!examples.empty()) {
+          JsonArray ex_arr;
+          for (const auto& ex : examples) {
+            ex_arr.push_back(Json(ex));
+          }
+          res["examples"] = Json(ex_arr);
+        }
+      }
+    } else if (t1_str == "number" || t1_str == "integer") {
+      // Merge numeric constraints
+      if (config.infer_numeric_ranges) {
+        double min1 = s1.count("minimum") && s1.at("minimum").is_number() ? s1.at("minimum").as_number() : -1e308;
+        double min2 = s2.count("minimum") && s2.at("minimum").is_number() ? s2.at("minimum").as_number() : -1e308;
+        double max1 = s1.count("maximum") && s1.at("maximum").is_number() ? s1.at("maximum").as_number() : 1e308;
+        double max2 = s2.count("maximum") && s2.at("maximum").is_number() ? s2.at("maximum").as_number() : 1e308;
+        
+        res["minimum"] = Json(std::min(min1, min2));
+        res["maximum"] = Json(std::max(max1, max2));
+      }
+    }
+    
+    return Json(res);
+  }
+  
+  // Different types - use anyOf if allowed
+  if (config.allow_any_of) {
+    // Check if we can merge integer and number
+    if ((t1_str == "integer" && t2_str == "number") || (t1_str == "number" && t2_str == "integer")) {
+      JsonObject result;
+      result["type"] = Json("number");
+      return Json(result);
+    }
+    
+    JsonObject result;
+    JsonArray any_of;
+    any_of.push_back(schema1);
+    any_of.push_back(schema2);
+    result["anyOf"] = Json(any_of);
+    return Json(result);
+  }
+  
+  // Fallback: merged type array
+  JsonObject result;
+  result["type"] = merge_types(type1, type2);
+  return Json(result);
+}
 
 SqlStreamParser::SqlStreamParser(Json schema) : schema_(std::move(schema)) {}
 

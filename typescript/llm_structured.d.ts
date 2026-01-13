@@ -139,3 +139,128 @@ export type ExamplePlan = {
     }
   >;
 };
+
+// ---- XML / HTML types ----
+
+export type XmlNodeType = 'element' | 'text' | 'comment' | 'cdata' | 'processing_instruction' | 'doctype';
+
+export interface XmlNode {
+  type: XmlNodeType;
+  name: string;
+  text: string;
+  attributes: Record<string, string>;
+  children: XmlNode[];
+}
+
+export interface XmlRepairConfig {
+  html_mode?: boolean;
+  fix_unquoted_attributes?: boolean;
+  auto_close_tags?: boolean;
+  normalize_whitespace?: boolean;
+  lowercase_names?: boolean;
+  decode_entities?: boolean;
+}
+
+export interface XmlRepairMetadata {
+  auto_closed_tags: number;
+  fixed_attributes: number;
+  decoded_entities: number;
+  normalized_whitespace: number;
+}
+
+export interface XmlParseResult {
+  ok: boolean;
+  error: string;
+  root: XmlNode | null;
+}
+
+export interface XmlParseResultEx {
+  ok: boolean;
+  error: string;
+  root: XmlNode | null;
+  metadata: XmlRepairMetadata;
+}
+
+export interface XmlValidationError {
+  path: string;
+  message: string;
+}
+
+export interface XmlValidationResult {
+  ok: boolean;
+  errors: XmlValidationError[];
+}
+
+export interface XmlParseAndValidateResult {
+  ok: boolean;
+  error: string;
+  root: XmlNode | null;
+  validation_errors: XmlValidationError[];
+}
+
+export interface XmlParseAndValidateResultEx {
+  ok: boolean;
+  error: string;
+  root: XmlNode | null;
+  validation_errors: XmlValidationError[];
+  metadata: XmlRepairMetadata;
+}
+
+export interface XmlSchema {
+  element?: string;
+  requiredAttributes?: string[];
+  attributes?: Record<string, {
+    pattern?: string;
+    enum?: string[];
+  }>;
+  children?: {
+    minItems?: number;
+    maxItems?: number;
+    required?: string[];
+  };
+  childSchema?: Record<string, XmlSchema>;
+}
+
+// ---- Schema Inference types ----
+
+export interface SchemaInferenceConfig {
+  /** Include "examples" array with sample values (up to maxExamples) */
+  includeExamples?: boolean;
+  /** Maximum number of examples to include (default: 3) */
+  maxExamples?: number;
+  /** Include "default" from the first seen value */
+  includeDefault?: boolean;
+  /** Infer "format" for strings (e.g., "date-time", "email", "uri") */
+  inferFormats?: boolean;
+  /** Infer "pattern" for strings that look like specific formats */
+  inferPatterns?: boolean;
+  /** Infer numeric constraints (minimum, maximum) from seen values */
+  inferNumericRanges?: boolean;
+  /** Infer string constraints (minLength, maxLength) from seen values */
+  inferStringLengths?: boolean;
+  /** Infer array constraints (minItems, maxItems) from seen values */
+  inferArrayLengths?: boolean;
+  /** Make all object properties required by default (default: true) */
+  requiredByDefault?: boolean;
+  /** Set additionalProperties to false by default (default: true) */
+  strictAdditionalProperties?: boolean;
+  /** Prefer "integer" over "number" when all values are whole numbers (default: true) */
+  preferInteger?: boolean;
+  /** Merge multiple types into anyOf when values have different types (default: true) */
+  allowAnyOf?: boolean;
+  /** Include "description" placeholders for properties */
+  includeDescriptions?: boolean;
+  /** Detect enum values when all values are from a small set of strings (default: true) */
+  detectEnums?: boolean;
+  /** Max distinct values for enum detection (default: 10) */
+  maxEnumValues?: number;
+}
+
+/** Infer JSON Schema from a single value */
+export function inferSchema(value: Json, config?: SchemaInferenceConfig): JsonSchema;
+
+/** Infer JSON Schema from multiple values (merges schemas) */
+export function inferSchemaFromValues(values: Json[], config?: SchemaInferenceConfig): JsonSchema;
+
+/** Merge two JSON Schemas into one that accepts values valid for either */
+export function mergeSchemas(schema1: JsonSchema, schema2: JsonSchema, config?: SchemaInferenceConfig): JsonSchema;

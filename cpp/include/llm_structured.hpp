@@ -200,6 +200,243 @@ KeyValue loads_kv(const std::string& text);
 void validate_kv(const KeyValue& kv, const Json& schema);
 KeyValue parse_and_validate_kv(const std::string& text, const Json& schema);
 
+// ---------------- YAML-ish ----------------
+
+// Configuration for YAML repairs.
+struct YamlRepairConfig {
+  // Convert tabs to spaces for consistent indentation.
+  bool fix_tabs{true};
+  // Normalize mixed indentation (use 2-space indentation).
+  bool normalize_indentation{true};
+  // Fix common YAML-ish issues: unquoted special chars, trailing whitespace.
+  bool fix_unquoted_values{true};
+  // Allow JSON-style inline objects/arrays within YAML.
+  bool allow_inline_json{true};
+  // Auto-quote strings that look like booleans or numbers but should be strings.
+  bool quote_ambiguous_strings{false};
+};
+
+struct YamlRepairMetadata {
+  bool extracted_from_fence{false};
+  bool fixed_tabs{false};
+  bool normalized_indentation{false};
+  bool fixed_unquoted_values{false};
+  bool converted_inline_json{false};
+  bool quoted_ambiguous_strings{false};
+};
+
+struct YamlishParseResult {
+  Json value;
+  std::string fixed;
+  YamlRepairMetadata metadata;
+};
+
+struct YamlishParseAllResult {
+  JsonArray values;
+  std::vector<std::string> fixed;
+  std::vector<YamlRepairMetadata> metadata;
+};
+
+// Extract a YAML candidate from LLM text (```yaml fenced block or structured YAML-like content).
+std::string extract_yaml_candidate(const std::string& text);
+
+// Extract ALL YAML candidates from text (multiple ```yaml fences or YAML documents separated by ---).
+std::vector<std::string> extract_yaml_candidates(const std::string& text);
+
+// Parse YAML-ish text into a Json value (applies best-effort repairs).
+Json loads_yamlish(const std::string& text);
+
+// Like loads_yamlish(), but returns repair metadata and the fixed YAML-ish text.
+YamlishParseResult loads_yamlish_ex(const std::string& text, const YamlRepairConfig& repair = YamlRepairConfig{});
+
+// Parse all YAML documents from the text and return them as an array.
+JsonArray loads_yamlish_all(const std::string& text);
+
+// Like loads_yamlish_all(), but returns per-item fixed text and repair metadata.
+YamlishParseAllResult loads_yamlish_all_ex(const std::string& text, const YamlRepairConfig& repair = YamlRepairConfig{});
+
+// Convenience: parse candidate from text, parse yamlish, then validate against JSON schema.
+Json parse_and_validate_yaml(const std::string& text, const Json& schema);
+
+// Like parse_and_validate_yaml(), but returns repair metadata and the fixed YAML-ish text.
+YamlishParseResult parse_and_validate_yaml_ex(const std::string& text, const Json& schema, const YamlRepairConfig& repair = YamlRepairConfig{});
+
+// Parse and validate ALL YAML documents; returns values as an array.
+JsonArray parse_and_validate_yaml_all(const std::string& text, const Json& schema);
+
+// Like parse_and_validate_yaml_all(), but returns per-item fixed text and repair metadata.
+YamlishParseAllResult parse_and_validate_yaml_all_ex(const std::string& text, const Json& schema, const YamlRepairConfig& repair = YamlRepairConfig{});
+
+// Serialize Json value to YAML string.
+std::string dumps_yaml(const Json& value, int indent = 2);
+
+// ---------------- TOML-ish ----------------
+
+// Configuration for TOML repairs.
+struct TomlRepairConfig {
+  // Fix common TOML-ish issues: unquoted strings, trailing commas.
+  bool fix_unquoted_strings{true};
+  // Allow single quotes (TOML normally only allows double quotes for basic strings).
+  bool allow_single_quotes{true};
+  // Convert tabs to spaces in multiline strings.
+  bool normalize_whitespace{true};
+  // Auto-fix missing quotes around table names with special chars.
+  bool fix_table_names{true};
+  // Allow inline tables to span multiple lines (not standard TOML).
+  bool allow_multiline_inline_tables{true};
+};
+
+struct TomlRepairMetadata {
+  bool extracted_from_fence{false};
+  bool fixed_unquoted_strings{false};
+  bool converted_single_quotes{false};
+  bool normalized_whitespace{false};
+  bool fixed_table_names{false};
+  bool converted_multiline_inline{false};
+};
+
+struct TomlishParseResult {
+  Json value;
+  std::string fixed;
+  TomlRepairMetadata metadata;
+};
+
+struct TomlishParseAllResult {
+  JsonArray values;
+  std::vector<std::string> fixed;
+  std::vector<TomlRepairMetadata> metadata;
+};
+
+// Extract a TOML candidate from LLM text (```toml fenced block or structured TOML-like content).
+std::string extract_toml_candidate(const std::string& text);
+
+// Extract ALL TOML candidates from text (multiple ```toml fences).
+std::vector<std::string> extract_toml_candidates(const std::string& text);
+
+// Parse TOML-ish text into a Json value (applies best-effort repairs).
+Json loads_tomlish(const std::string& text);
+
+// Like loads_tomlish(), but returns repair metadata and the fixed TOML-ish text.
+TomlishParseResult loads_tomlish_ex(const std::string& text, const TomlRepairConfig& repair = TomlRepairConfig{});
+
+// Parse all TOML documents from the text and return them as an array.
+JsonArray loads_tomlish_all(const std::string& text);
+
+// Like loads_tomlish_all(), but returns per-item fixed text and repair metadata.
+TomlishParseAllResult loads_tomlish_all_ex(const std::string& text, const TomlRepairConfig& repair = TomlRepairConfig{});
+
+// Convenience: parse candidate from text, parse tomlish, then validate against JSON schema.
+Json parse_and_validate_toml(const std::string& text, const Json& schema);
+
+// Like parse_and_validate_toml(), but returns repair metadata and the fixed TOML-ish text.
+TomlishParseResult parse_and_validate_toml_ex(const std::string& text, const Json& schema, const TomlRepairConfig& repair = TomlRepairConfig{});
+
+// Parse and validate ALL TOML documents; returns values as an array.
+JsonArray parse_and_validate_toml_all(const std::string& text, const Json& schema);
+
+// Like parse_and_validate_toml_all(), but returns per-item fixed text and repair metadata.
+TomlishParseAllResult parse_and_validate_toml_all_ex(const std::string& text, const Json& schema, const TomlRepairConfig& repair = TomlRepairConfig{});
+
+// Serialize Json value to TOML string.
+std::string dumps_toml(const Json& value);
+
+// ---------------- XML/HTML-ish ----------------
+
+// Represents an XML/HTML node (element, text, comment, etc.)
+struct XmlNode {
+  enum class Type { Element, Text, Comment, CData, ProcessingInstruction, Doctype };
+  Type type{Type::Element};
+  std::string name;           // Tag name for elements, target for PI
+  std::string text;           // Text content for Text/Comment/CData/PI
+  std::map<std::string, std::string> attributes;
+  std::vector<XmlNode> children;
+  bool self_closing{false};
+};
+
+// Configuration for XML/HTML repairs.
+struct XmlRepairConfig {
+  // Parse as HTML (more lenient: void elements, optional closing tags).
+  bool html_mode{false};
+  // Fix common issues: unquoted attributes, missing closing tags.
+  bool fix_unquoted_attributes{true};
+  // Auto-close unclosed tags.
+  bool auto_close_tags{true};
+  // Normalize whitespace in text nodes.
+  bool normalize_whitespace{false};
+  // Convert to lowercase tag/attribute names (HTML convention).
+  bool lowercase_names{false};
+  // Decode HTML entities (&amp; -> &).
+  bool decode_entities{true};
+};
+
+struct XmlRepairMetadata {
+  bool extracted_from_fence{false};
+  bool fixed_unquoted_attributes{false};
+  bool auto_closed_tags{false};
+  bool normalized_whitespace{false};
+  bool lowercased_names{false};
+  bool decoded_entities{false};
+  int unclosed_tag_count{0};
+};
+
+struct XmlParseResult {
+  XmlNode root;
+  std::string fixed;
+  XmlRepairMetadata metadata;
+};
+
+struct XmlParseAllResult {
+  std::vector<XmlNode> roots;
+  std::vector<std::string> fixed;
+  std::vector<XmlRepairMetadata> metadata;
+};
+
+// Extract an XML/HTML candidate from LLM text (```xml/html fenced block or <tag>...</tag>).
+std::string extract_xml_candidate(const std::string& text);
+
+// Extract ALL XML/HTML candidates from text.
+std::vector<std::string> extract_xml_candidates(const std::string& text);
+
+// Parse XML/HTML-ish text into an XmlNode tree (applies best-effort repairs).
+XmlNode loads_xml(const std::string& text);
+
+// Like loads_xml(), but returns repair metadata and the fixed text.
+XmlParseResult loads_xml_ex(const std::string& text, const XmlRepairConfig& repair = XmlRepairConfig{});
+
+// Parse HTML text (shortcut for XML with html_mode=true).
+XmlNode loads_html(const std::string& text);
+
+// Like loads_html(), but returns repair metadata.
+XmlParseResult loads_html_ex(const std::string& text, const XmlRepairConfig& repair = XmlRepairConfig{});
+
+// Convert XmlNode tree to a Json representation.
+Json xml_to_json(const XmlNode& node);
+
+// Parse XML/HTML and convert to Json.
+Json loads_xml_as_json(const std::string& text);
+Json loads_html_as_json(const std::string& text);
+
+// Serialize XmlNode tree back to XML/HTML string.
+std::string dumps_xml(const XmlNode& node, int indent = 2);
+std::string dumps_html(const XmlNode& node, int indent = 2);
+
+// Query XML nodes using simple XPath-like expressions.
+std::vector<XmlNode*> query_xml(XmlNode& root, const std::string& selector);
+std::vector<const XmlNode*> query_xml(const XmlNode& root, const std::string& selector);
+
+// Get text content from node and all descendants.
+std::string xml_text_content(const XmlNode& node);
+
+// Get attribute value (returns empty string if not found).
+std::string xml_get_attribute(const XmlNode& node, const std::string& name);
+
+// Validate XML structure against a schema (element names, required attributes, etc.).
+void validate_xml(const XmlNode& node, const Json& schema, const std::string& path = "$");
+
+// Parse and validate XML/HTML.
+XmlNode parse_and_validate_xml(const std::string& text, const Json& schema);
+XmlParseResult parse_and_validate_xml_ex(const std::string& text, const Json& schema, const XmlRepairConfig& repair = XmlRepairConfig{});
+
 // ---------------- SQL safety (heuristic) ----------------
 
 struct SqlParsed {
@@ -329,6 +566,63 @@ class JsonStreamValidatedBatchCollector {
   bool done_{false};
   StreamOutcome<JsonArray> last_{};
 };
+
+// ---------------- Schema Inference ----------------
+
+// Configuration for schema inference behavior
+struct SchemaInferenceConfig {
+  // Include "examples" array with sample values (up to max_examples)
+  bool include_examples{false};
+  int max_examples{3};
+  
+  // Include "default" from the first seen value
+  bool include_default{false};
+  
+  // Infer "format" for strings (e.g., "date-time", "email", "uri")
+  bool infer_formats{true};
+  
+  // Infer "pattern" for strings that look like specific formats
+  bool infer_patterns{false};
+  
+  // Infer numeric constraints (minimum, maximum) from seen values
+  bool infer_numeric_ranges{false};
+  
+  // Infer string constraints (minLength, maxLength) from seen values
+  bool infer_string_lengths{false};
+  
+  // Infer array constraints (minItems, maxItems) from seen values
+  bool infer_array_lengths{false};
+  
+  // Make all object properties required by default
+  bool required_by_default{true};
+  
+  // Set additionalProperties to false by default
+  bool strict_additional_properties{true};
+  
+  // Prefer "integer" over "number" when all values are whole numbers
+  bool prefer_integer{true};
+  
+  // Merge multiple types into anyOf when values have different types
+  bool allow_any_of{true};
+  
+  // Include "description" placeholders for properties
+  bool include_descriptions{false};
+  
+  // Detect enum values when all values are from a small set of strings
+  bool detect_enums{true};
+  int max_enum_values{10};
+};
+
+// Infer JSON Schema from a single JSON value
+Json infer_schema(const Json& value, const SchemaInferenceConfig& config = SchemaInferenceConfig{});
+
+// Infer JSON Schema from multiple JSON values (merges schemas)
+Json infer_schema_from_values(const JsonArray& values, const SchemaInferenceConfig& config = SchemaInferenceConfig{});
+
+// Merge two schemas into one that accepts values valid for either schema
+Json merge_schemas(const Json& schema1, const Json& schema2, const SchemaInferenceConfig& config = SchemaInferenceConfig{});
+
+// ---------------- Streaming parsers ----------------
 
 class SqlStreamParser {
  public:

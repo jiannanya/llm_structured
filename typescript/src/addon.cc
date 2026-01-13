@@ -887,6 +887,1316 @@ static napi_value ValidateAllJsonValue(napi_env env, napi_callback_info info) {
   }
 }
 
+// ---- YAML APIs ----
+
+static napi_value ExtractYamlCandidate(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 1) {
+    ThrowTypeError(env, "extractYamlCandidate(text) expects 1 argument");
+    return nullptr;
+  }
+
+  std::string text;
+  if (!GetStringUtf8(env, argv[0], text)) {
+    ThrowTypeError(env, "extractYamlCandidate(text) expects text as string");
+    return nullptr;
+  }
+
+  try {
+    const auto cand = llm_structured::extract_yaml_candidate(text);
+    return MakeString(env, cand);
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ExtractYamlCandidates(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 1) {
+    ThrowTypeError(env, "extractYamlCandidates(text) expects 1 argument");
+    return nullptr;
+  }
+
+  std::string text;
+  if (!GetStringUtf8(env, argv[0], text)) {
+    ThrowTypeError(env, "extractYamlCandidates(text) expects text as string");
+    return nullptr;
+  }
+
+  try {
+    const auto cands = llm_structured::extract_yaml_candidates(text);
+    napi_value arr;
+    napi_create_array_with_length(env, cands.size(), &arr);
+    for (size_t i = 0; i < cands.size(); ++i) {
+      napi_set_element(env, arr, static_cast<uint32_t>(i), MakeString(env, cands[i]));
+    }
+    return arr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static bool YamlRepairConfigFromNapi(napi_env env, napi_value v, llm_structured::YamlRepairConfig& out) {
+  napi_valuetype t;
+  if (napi_typeof(env, v, &t) != napi_ok) return false;
+  if (t == napi_null || t == napi_undefined) return true;
+  if (t != napi_object) {
+    ThrowTypeError(env, "yaml repair config must be an object");
+    return false;
+  }
+  if (!GetOptionalBoolProperty(env, v, "fixTabs", out.fix_tabs)) return false;
+  if (!GetOptionalBoolProperty(env, v, "normalizeIndentation", out.normalize_indentation)) return false;
+  if (!GetOptionalBoolProperty(env, v, "fixUnquotedValues", out.fix_unquoted_values)) return false;
+  if (!GetOptionalBoolProperty(env, v, "allowInlineJson", out.allow_inline_json)) return false;
+  if (!GetOptionalBoolProperty(env, v, "quoteAmbiguousStrings", out.quote_ambiguous_strings)) return false;
+  return true;
+}
+
+static napi_value YamlRepairMetadataToNapi(napi_env env, const llm_structured::YamlRepairMetadata& m) {
+  napi_value obj;
+  napi_create_object(env, &obj);
+  napi_value b;
+  napi_get_boolean(env, m.extracted_from_fence, &b);
+  napi_set_named_property(env, obj, "extractedFromFence", b);
+  napi_get_boolean(env, m.fixed_tabs, &b);
+  napi_set_named_property(env, obj, "fixedTabs", b);
+  napi_get_boolean(env, m.normalized_indentation, &b);
+  napi_set_named_property(env, obj, "normalizedIndentation", b);
+  napi_get_boolean(env, m.fixed_unquoted_values, &b);
+  napi_set_named_property(env, obj, "fixedUnquotedValues", b);
+  napi_get_boolean(env, m.converted_inline_json, &b);
+  napi_set_named_property(env, obj, "convertedInlineJson", b);
+  napi_get_boolean(env, m.quoted_ambiguous_strings, &b);
+  napi_set_named_property(env, obj, "quotedAmbiguousStrings", b);
+  return obj;
+}
+
+static napi_value LoadsYamlishEx(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "loadsYamlishEx(text, repair?) expects 1-2 arguments");
+    return nullptr;
+  }
+
+  std::string text;
+  if (!GetStringUtf8(env, argv[0], text)) {
+    ThrowTypeError(env, "loadsYamlishEx(text, repair?) expects text as string");
+    return nullptr;
+  }
+
+  llm_structured::YamlRepairConfig repair;
+  if (argc >= 2) {
+    if (!YamlRepairConfigFromNapi(env, argv[1], repair)) return nullptr;
+  }
+
+  try {
+    auto r = llm_structured::loads_yamlish_ex(text, repair);
+    napi_value obj;
+    napi_create_object(env, &obj);
+    napi_set_named_property(env, obj, "value", ToNapi(env, r.value));
+    napi_set_named_property(env, obj, "fixed", MakeString(env, r.fixed));
+    napi_set_named_property(env, obj, "metadata", YamlRepairMetadataToNapi(env, r.metadata));
+    return obj;
+  } catch (const ValidationError& e) {
+    ThrowValidationError(env, e);
+    return nullptr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value LoadsYamlishAllEx(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "loadsYamlishAllEx(text, repair?) expects 1-2 arguments");
+    return nullptr;
+  }
+
+  std::string text;
+  if (!GetStringUtf8(env, argv[0], text)) {
+    ThrowTypeError(env, "loadsYamlishAllEx(text, repair?) expects text as string");
+    return nullptr;
+  }
+
+  llm_structured::YamlRepairConfig repair;
+  if (argc >= 2) {
+    if (!YamlRepairConfigFromNapi(env, argv[1], repair)) return nullptr;
+  }
+
+  try {
+    auto r = llm_structured::loads_yamlish_all_ex(text, repair);
+    napi_value obj;
+    napi_create_object(env, &obj);
+    
+    napi_value values;
+    napi_create_array_with_length(env, r.values.size(), &values);
+    for (size_t i = 0; i < r.values.size(); ++i) {
+      napi_set_element(env, values, static_cast<uint32_t>(i), ToNapi(env, r.values[i]));
+    }
+    napi_set_named_property(env, obj, "values", values);
+    
+    napi_value fixed;
+    napi_create_array_with_length(env, r.fixed.size(), &fixed);
+    for (size_t i = 0; i < r.fixed.size(); ++i) {
+      napi_set_element(env, fixed, static_cast<uint32_t>(i), MakeString(env, r.fixed[i]));
+    }
+    napi_set_named_property(env, obj, "fixed", fixed);
+    
+    napi_value metadata;
+    napi_create_array_with_length(env, r.metadata.size(), &metadata);
+    for (size_t i = 0; i < r.metadata.size(); ++i) {
+      napi_set_element(env, metadata, static_cast<uint32_t>(i), YamlRepairMetadataToNapi(env, r.metadata[i]));
+    }
+    napi_set_named_property(env, obj, "metadata", metadata);
+    
+    return obj;
+  } catch (const ValidationError& e) {
+    ThrowValidationError(env, e);
+    return nullptr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value DumpsYaml(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "dumpsYaml(value, indent?) expects 1-2 arguments");
+    return nullptr;
+  }
+
+  Json value;
+  if (!FromNapi(env, argv[0], value)) {
+    ThrowTypeError(env, "dumpsYaml(value, indent?) expects value to be JSON-serializable");
+    return nullptr;
+  }
+
+  int indent = 2;
+  if (argc >= 2) {
+    napi_valuetype t;
+    if (napi_typeof(env, argv[1], &t) != napi_ok) return nullptr;
+    if (t == napi_number) {
+      double d = 0;
+      if (napi_get_value_double(env, argv[1], &d) != napi_ok) return nullptr;
+      indent = static_cast<int>(d);
+    }
+  }
+
+  try {
+    std::string yaml = llm_structured::dumps_yaml(value, indent);
+    return MakeString(env, yaml);
+  } catch (const std::exception& e) {
+    ThrowError(env, e.what());
+    return nullptr;
+  }
+}
+
+static napi_value ParseAndValidateYaml(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 2) {
+    ThrowTypeError(env, "parseAndValidateYaml(text, schemaJson) expects 2 arguments");
+    return nullptr;
+  }
+
+  std::string text;
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[0], text) || !GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseAndValidateYaml(text, schemaJson) expects strings");
+    return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    Json result = llm_structured::parse_and_validate_yaml(text, schema);
+    return ToNapi(env, result);
+  } catch (const ValidationError& e) {
+    ThrowValidationError(env, e);
+    return nullptr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseAndValidateYamlEx(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2 || argc > 3) {
+    ThrowTypeError(env, "parseAndValidateYamlEx(text, schemaJson, repair?) expects 2-3 arguments");
+    return nullptr;
+  }
+
+  std::string text;
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[0], text) || !GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseAndValidateYamlEx(text, schemaJson, repair?) expects strings");
+    return nullptr;
+  }
+
+  llm_structured::YamlRepairConfig repair;
+  if (argc >= 3) {
+    if (!YamlRepairConfigFromNapi(env, argv[2], repair)) return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    auto r = llm_structured::parse_and_validate_yaml_ex(text, schema, repair);
+    napi_value obj;
+    napi_create_object(env, &obj);
+    napi_set_named_property(env, obj, "value", ToNapi(env, r.value));
+    napi_set_named_property(env, obj, "fixed", MakeString(env, r.fixed));
+    napi_set_named_property(env, obj, "metadata", YamlRepairMetadataToNapi(env, r.metadata));
+    return obj;
+  } catch (const ValidationError& e) {
+    ThrowValidationError(env, e);
+    return nullptr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseAndValidateYamlAllEx(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2 || argc > 3) {
+    ThrowTypeError(env, "parseAndValidateYamlAllEx(text, schemaJson, repair?) expects 2-3 arguments");
+    return nullptr;
+  }
+
+  std::string text;
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[0], text) || !GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseAndValidateYamlAllEx(text, schemaJson, repair?) expects strings");
+    return nullptr;
+  }
+
+  llm_structured::YamlRepairConfig repair;
+  if (argc >= 3) {
+    if (!YamlRepairConfigFromNapi(env, argv[2], repair)) return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    auto r = llm_structured::parse_and_validate_yaml_all_ex(text, schema, repair);
+    napi_value obj;
+    napi_create_object(env, &obj);
+    
+    napi_value values;
+    napi_create_array_with_length(env, r.values.size(), &values);
+    for (size_t i = 0; i < r.values.size(); ++i) {
+      napi_set_element(env, values, static_cast<uint32_t>(i), ToNapi(env, r.values[i]));
+    }
+    napi_set_named_property(env, obj, "values", values);
+    
+    napi_value fixed;
+    napi_create_array_with_length(env, r.fixed.size(), &fixed);
+    for (size_t i = 0; i < r.fixed.size(); ++i) {
+      napi_set_element(env, fixed, static_cast<uint32_t>(i), MakeString(env, r.fixed[i]));
+    }
+    napi_set_named_property(env, obj, "fixed", fixed);
+    
+    napi_value metadata;
+    napi_create_array_with_length(env, r.metadata.size(), &metadata);
+    for (size_t i = 0; i < r.metadata.size(); ++i) {
+      napi_set_element(env, metadata, static_cast<uint32_t>(i), YamlRepairMetadataToNapi(env, r.metadata[i]));
+    }
+    napi_set_named_property(env, obj, "metadata", metadata);
+    
+    return obj;
+  } catch (const ValidationError& e) {
+    ThrowValidationError(env, e);
+    return nullptr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+// ---- TOML helpers ----
+
+static bool TomlRepairConfigFromNapi(napi_env env, napi_value v, llm_structured::TomlRepairConfig& out) {
+  napi_valuetype t;
+  if (napi_typeof(env, v, &t) != napi_ok) return false;
+  if (t == napi_null || t == napi_undefined) return true;
+  if (t != napi_object) {
+    ThrowTypeError(env, "toml repair config must be an object");
+    return false;
+  }
+  if (!GetOptionalBoolProperty(env, v, "fixUnquotedStrings", out.fix_unquoted_strings)) return false;
+  if (!GetOptionalBoolProperty(env, v, "allowSingleQuotes", out.allow_single_quotes)) return false;
+  if (!GetOptionalBoolProperty(env, v, "normalizeWhitespace", out.normalize_whitespace)) return false;
+  if (!GetOptionalBoolProperty(env, v, "fixTableNames", out.fix_table_names)) return false;
+  if (!GetOptionalBoolProperty(env, v, "allowMultilineInlineTables", out.allow_multiline_inline_tables)) return false;
+  return true;
+}
+
+static napi_value TomlRepairMetadataToNapi(napi_env env, const llm_structured::TomlRepairMetadata& m) {
+  napi_value obj;
+  napi_create_object(env, &obj);
+  napi_value b;
+  napi_get_boolean(env, m.extracted_from_fence, &b);
+  napi_set_named_property(env, obj, "extractedFromFence", b);
+  napi_get_boolean(env, m.fixed_unquoted_strings, &b);
+  napi_set_named_property(env, obj, "fixedUnquotedStrings", b);
+  napi_get_boolean(env, m.converted_single_quotes, &b);
+  napi_set_named_property(env, obj, "convertedSingleQuotes", b);
+  napi_get_boolean(env, m.normalized_whitespace, &b);
+  napi_set_named_property(env, obj, "normalizedWhitespace", b);
+  napi_get_boolean(env, m.fixed_table_names, &b);
+  napi_set_named_property(env, obj, "fixedTableNames", b);
+  napi_get_boolean(env, m.converted_multiline_inline, &b);
+  napi_set_named_property(env, obj, "convertedMultilineInline", b);
+  return obj;
+}
+
+static napi_value ExtractTomlCandidate(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 1) {
+    ThrowTypeError(env, "extractTomlCandidate(text) expects 1 argument");
+    return nullptr;
+  }
+
+  std::string text;
+  if (!GetStringUtf8(env, argv[0], text)) {
+    ThrowTypeError(env, "extractTomlCandidate(text) expects text as string");
+    return nullptr;
+  }
+
+  try {
+    std::string result = llm_structured::extract_toml_candidate(text);
+    return MakeString(env, result);
+  } catch (const std::exception& e) {
+    ThrowError(env, e.what());
+    return nullptr;
+  }
+}
+
+static napi_value ExtractTomlCandidates(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 1) {
+    ThrowTypeError(env, "extractTomlCandidates(text) expects 1 argument");
+    return nullptr;
+  }
+
+  std::string text;
+  if (!GetStringUtf8(env, argv[0], text)) {
+    ThrowTypeError(env, "extractTomlCandidates(text) expects text as string");
+    return nullptr;
+  }
+
+  try {
+    auto results = llm_structured::extract_toml_candidates(text);
+    napi_value arr;
+    napi_create_array_with_length(env, results.size(), &arr);
+    for (size_t i = 0; i < results.size(); ++i) {
+      napi_set_element(env, arr, static_cast<uint32_t>(i), MakeString(env, results[i]));
+    }
+    return arr;
+  } catch (const std::exception& e) {
+    ThrowError(env, e.what());
+    return nullptr;
+  }
+}
+
+static napi_value LoadsTomlishEx(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "loadsTomlishEx(text, repair?) expects 1-2 arguments");
+    return nullptr;
+  }
+
+  std::string text;
+  if (!GetStringUtf8(env, argv[0], text)) {
+    ThrowTypeError(env, "loadsTomlishEx(text, repair?) expects text as string");
+    return nullptr;
+  }
+
+  llm_structured::TomlRepairConfig repair;
+  if (argc >= 2) {
+    if (!TomlRepairConfigFromNapi(env, argv[1], repair)) return nullptr;
+  }
+
+  try {
+    auto r = llm_structured::loads_tomlish_ex(text, repair);
+    napi_value obj;
+    napi_create_object(env, &obj);
+    napi_set_named_property(env, obj, "value", ToNapi(env, r.value));
+    napi_set_named_property(env, obj, "fixed", MakeString(env, r.fixed));
+    napi_set_named_property(env, obj, "metadata", TomlRepairMetadataToNapi(env, r.metadata));
+    return obj;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value LoadsTomlishAllEx(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "loadsTomlishAllEx(text, repair?) expects 1-2 arguments");
+    return nullptr;
+  }
+
+  std::string text;
+  if (!GetStringUtf8(env, argv[0], text)) {
+    ThrowTypeError(env, "loadsTomlishAllEx(text, repair?) expects text as string");
+    return nullptr;
+  }
+
+  llm_structured::TomlRepairConfig repair;
+  if (argc >= 2) {
+    if (!TomlRepairConfigFromNapi(env, argv[1], repair)) return nullptr;
+  }
+
+  try {
+    auto r = llm_structured::loads_tomlish_all_ex(text, repair);
+    napi_value obj;
+    napi_create_object(env, &obj);
+
+    napi_value values;
+    napi_create_array_with_length(env, r.values.size(), &values);
+    for (size_t i = 0; i < r.values.size(); ++i) {
+      napi_set_element(env, values, static_cast<uint32_t>(i), ToNapi(env, r.values[i]));
+    }
+    napi_set_named_property(env, obj, "values", values);
+
+    napi_value fixed;
+    napi_create_array_with_length(env, r.fixed.size(), &fixed);
+    for (size_t i = 0; i < r.fixed.size(); ++i) {
+      napi_set_element(env, fixed, static_cast<uint32_t>(i), MakeString(env, r.fixed[i]));
+    }
+    napi_set_named_property(env, obj, "fixed", fixed);
+
+    napi_value metadata;
+    napi_create_array_with_length(env, r.metadata.size(), &metadata);
+    for (size_t i = 0; i < r.metadata.size(); ++i) {
+      napi_set_element(env, metadata, static_cast<uint32_t>(i), TomlRepairMetadataToNapi(env, r.metadata[i]));
+    }
+    napi_set_named_property(env, obj, "metadata", metadata);
+
+    return obj;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value DumpsToml(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 1) {
+    ThrowTypeError(env, "dumpsToml(value) expects 1 argument");
+    return nullptr;
+  }
+
+  Json value;
+  if (!FromNapi(env, argv[0], value)) {
+    ThrowTypeError(env, "dumpsToml(value) expects value to be JSON-serializable");
+    return nullptr;
+  }
+
+  try {
+    std::string toml = llm_structured::dumps_toml(value);
+    return MakeString(env, toml);
+  } catch (const std::exception& e) {
+    ThrowError(env, e.what());
+    return nullptr;
+  }
+}
+
+static napi_value ParseAndValidateToml(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 2) {
+    ThrowTypeError(env, "parseAndValidateToml(text, schemaJson) expects 2 arguments");
+    return nullptr;
+  }
+
+  std::string text;
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[0], text) || !GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseAndValidateToml(text, schemaJson) expects strings");
+    return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    Json result = llm_structured::parse_and_validate_toml(text, schema);
+    return ToNapi(env, result);
+  } catch (const ValidationError& e) {
+    ThrowValidationError(env, e);
+    return nullptr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseAndValidateTomlEx(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2 || argc > 3) {
+    ThrowTypeError(env, "parseAndValidateTomlEx(text, schemaJson, repair?) expects 2-3 arguments");
+    return nullptr;
+  }
+
+  std::string text;
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[0], text) || !GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseAndValidateTomlEx(text, schemaJson, repair?) expects strings");
+    return nullptr;
+  }
+
+  llm_structured::TomlRepairConfig repair;
+  if (argc >= 3) {
+    if (!TomlRepairConfigFromNapi(env, argv[2], repair)) return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    auto r = llm_structured::parse_and_validate_toml_ex(text, schema, repair);
+    napi_value obj;
+    napi_create_object(env, &obj);
+    napi_set_named_property(env, obj, "value", ToNapi(env, r.value));
+    napi_set_named_property(env, obj, "fixed", MakeString(env, r.fixed));
+    napi_set_named_property(env, obj, "metadata", TomlRepairMetadataToNapi(env, r.metadata));
+    return obj;
+  } catch (const ValidationError& e) {
+    ThrowValidationError(env, e);
+    return nullptr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseAndValidateTomlAllEx(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2 || argc > 3) {
+    ThrowTypeError(env, "parseAndValidateTomlAllEx(text, schemaJson, repair?) expects 2-3 arguments");
+    return nullptr;
+  }
+
+  std::string text;
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[0], text) || !GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseAndValidateTomlAllEx(text, schemaJson, repair?) expects strings");
+    return nullptr;
+  }
+
+  llm_structured::TomlRepairConfig repair;
+  if (argc >= 3) {
+    if (!TomlRepairConfigFromNapi(env, argv[2], repair)) return nullptr;
+  }
+
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    auto r = llm_structured::parse_and_validate_toml_all_ex(text, schema, repair);
+    napi_value obj;
+    napi_create_object(env, &obj);
+
+    napi_value values;
+    napi_create_array_with_length(env, r.values.size(), &values);
+    for (size_t i = 0; i < r.values.size(); ++i) {
+      napi_set_element(env, values, static_cast<uint32_t>(i), ToNapi(env, r.values[i]));
+    }
+    napi_set_named_property(env, obj, "values", values);
+
+    napi_value fixed;
+    napi_create_array_with_length(env, r.fixed.size(), &fixed);
+    for (size_t i = 0; i < r.fixed.size(); ++i) {
+      napi_set_element(env, fixed, static_cast<uint32_t>(i), MakeString(env, r.fixed[i]));
+    }
+    napi_set_named_property(env, obj, "fixed", fixed);
+
+    napi_value metadata;
+    napi_create_array_with_length(env, r.metadata.size(), &metadata);
+    for (size_t i = 0; i < r.metadata.size(); ++i) {
+      napi_set_element(env, metadata, static_cast<uint32_t>(i), TomlRepairMetadataToNapi(env, r.metadata[i]));
+    }
+    napi_set_named_property(env, obj, "metadata", metadata);
+
+    return obj;
+  } catch (const ValidationError& e) {
+    ThrowValidationError(env, e);
+    return nullptr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+// ---- XML / HTML helpers ----
+
+static napi_value XmlNodeToNapi(napi_env env, const llm_structured::XmlNode& node);
+
+static napi_value XmlNodeToNapi(napi_env env, const llm_structured::XmlNode& node) {
+  napi_value obj;
+  napi_create_object(env, &obj);
+
+  const char* type_str = "element";
+  switch (node.type) {
+    case llm_structured::XmlNode::Type::Element: type_str = "element"; break;
+    case llm_structured::XmlNode::Type::Text: type_str = "text"; break;
+    case llm_structured::XmlNode::Type::Comment: type_str = "comment"; break;
+    case llm_structured::XmlNode::Type::CData: type_str = "cdata"; break;
+    case llm_structured::XmlNode::Type::ProcessingInstruction: type_str = "processing_instruction"; break;
+    case llm_structured::XmlNode::Type::Doctype: type_str = "doctype"; break;
+  }
+  napi_set_named_property(env, obj, "type", MakeString(env, type_str));
+  napi_set_named_property(env, obj, "name", MakeString(env, node.name));
+  napi_set_named_property(env, obj, "text", MakeString(env, node.text));
+
+  napi_value attrs;
+  napi_create_object(env, &attrs);
+  for (const auto& kv : node.attributes) {
+    napi_set_named_property(env, attrs, kv.first.c_str(), MakeString(env, kv.second));
+  }
+  napi_set_named_property(env, obj, "attributes", attrs);
+
+  napi_value children;
+  napi_create_array_with_length(env, node.children.size(), &children);
+  for (size_t i = 0; i < node.children.size(); ++i) {
+    napi_set_element(env, children, static_cast<uint32_t>(i), XmlNodeToNapi(env, node.children[i]));
+  }
+  napi_set_named_property(env, obj, "children", children);
+
+  return obj;
+}
+
+static bool XmlRepairConfigFromNapi(napi_env env, napi_value val, llm_structured::XmlRepairConfig& cfg) {
+  napi_valuetype vtype;
+  napi_typeof(env, val, &vtype);
+  if (vtype == napi_undefined || vtype == napi_null) return true;
+  if (vtype != napi_object) {
+    ThrowTypeError(env, "XmlRepairConfig must be an object");
+    return false;
+  }
+  bool has = false;
+  napi_has_named_property(env, val, "html_mode", &has);
+  if (has) { napi_value v; napi_get_named_property(env, val, "html_mode", &v); napi_get_value_bool(env, v, &cfg.html_mode); }
+  napi_has_named_property(env, val, "fix_unquoted_attributes", &has);
+  if (has) { napi_value v; napi_get_named_property(env, val, "fix_unquoted_attributes", &v); napi_get_value_bool(env, v, &cfg.fix_unquoted_attributes); }
+  napi_has_named_property(env, val, "auto_close_tags", &has);
+  if (has) { napi_value v; napi_get_named_property(env, val, "auto_close_tags", &v); napi_get_value_bool(env, v, &cfg.auto_close_tags); }
+  napi_has_named_property(env, val, "normalize_whitespace", &has);
+  if (has) { napi_value v; napi_get_named_property(env, val, "normalize_whitespace", &v); napi_get_value_bool(env, v, &cfg.normalize_whitespace); }
+  napi_has_named_property(env, val, "lowercase_names", &has);
+  if (has) { napi_value v; napi_get_named_property(env, val, "lowercase_names", &v); napi_get_value_bool(env, v, &cfg.lowercase_names); }
+  napi_has_named_property(env, val, "decode_entities", &has);
+  if (has) { napi_value v; napi_get_named_property(env, val, "decode_entities", &v); napi_get_value_bool(env, v, &cfg.decode_entities); }
+  return true;
+}
+
+static napi_value XmlRepairMetadataToNapi(napi_env env, const llm_structured::XmlRepairMetadata& meta) {
+  napi_value obj;
+  napi_create_object(env, &obj);
+  napi_value v;
+  napi_create_int32(env, meta.auto_closed_tags, &v);
+  napi_set_named_property(env, obj, "auto_closed_tags", v);
+  napi_create_int32(env, meta.fixed_attributes, &v);
+  napi_set_named_property(env, obj, "fixed_attributes", v);
+  napi_create_int32(env, meta.decoded_entities, &v);
+  napi_set_named_property(env, obj, "decoded_entities", v);
+  napi_create_int32(env, meta.normalized_whitespace, &v);
+  napi_set_named_property(env, obj, "normalized_whitespace", v);
+  return obj;
+}
+
+static llm_structured::XmlNode NapiToXmlNode(napi_env env, napi_value val) {
+  llm_structured::XmlNode node;
+  napi_value v;
+  std::string str;
+  
+  napi_get_named_property(env, val, "type", &v);
+  GetStringUtf8(env, v, str);
+  if (str == "element") node.type = llm_structured::XmlNode::Type::Element;
+  else if (str == "text") node.type = llm_structured::XmlNode::Type::Text;
+  else if (str == "comment") node.type = llm_structured::XmlNode::Type::Comment;
+  else if (str == "cdata") node.type = llm_structured::XmlNode::Type::CData;
+  else if (str == "processing_instruction") node.type = llm_structured::XmlNode::Type::ProcessingInstruction;
+  else if (str == "doctype") node.type = llm_structured::XmlNode::Type::Doctype;
+  
+  napi_get_named_property(env, val, "name", &v);
+  GetStringUtf8(env, v, node.name);
+  
+  napi_get_named_property(env, val, "text", &v);
+  GetStringUtf8(env, v, node.text);
+  
+  napi_get_named_property(env, val, "attributes", &v);
+  napi_valuetype vtype;
+  napi_typeof(env, v, &vtype);
+  if (vtype == napi_object) {
+    napi_value keys;
+    napi_get_property_names(env, v, &keys);
+    uint32_t len = 0;
+    napi_get_array_length(env, keys, &len);
+    for (uint32_t i = 0; i < len; ++i) {
+      napi_value key;
+      napi_get_element(env, keys, i, &key);
+      std::string key_str, val_str;
+      GetStringUtf8(env, key, key_str);
+      napi_value attr_val;
+      napi_get_property(env, v, key, &attr_val);
+      GetStringUtf8(env, attr_val, val_str);
+      node.attributes[key_str] = val_str;
+    }
+  }
+  
+  napi_get_named_property(env, val, "children", &v);
+  bool is_array = false;
+  napi_is_array(env, v, &is_array);
+  if (is_array) {
+    uint32_t len = 0;
+    napi_get_array_length(env, v, &len);
+    for (uint32_t i = 0; i < len; ++i) {
+      napi_value child;
+      napi_get_element(env, v, i, &child);
+      node.children.push_back(NapiToXmlNode(env, child));
+    }
+  }
+  
+  return node;
+}
+
+// ---- XML / HTML functions ----
+
+static napi_value ExtractXmlCandidate(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "extractXmlCandidate(text, rootTag?) expects 1-2 arguments");
+    return nullptr;
+  }
+  std::string text;
+  if (!GetStringUtf8(env, argv[0], text)) {
+    ThrowTypeError(env, "extractXmlCandidate expects string");
+    return nullptr;
+  }
+  std::string root_tag;
+  if (argc >= 2) GetStringUtf8(env, argv[1], root_tag);
+  return MakeString(env, llm_structured::extract_xml_candidate(text, root_tag));
+}
+
+static napi_value ExtractXmlCandidates(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "extractXmlCandidates(text, rootTag?) expects 1-2 arguments");
+    return nullptr;
+  }
+  std::string text;
+  if (!GetStringUtf8(env, argv[0], text)) {
+    ThrowTypeError(env, "extractXmlCandidates expects string");
+    return nullptr;
+  }
+  std::string root_tag;
+  if (argc >= 2) GetStringUtf8(env, argv[1], root_tag);
+  auto results = llm_structured::extract_xml_candidates(text, root_tag);
+  napi_value arr;
+  napi_create_array_with_length(env, results.size(), &arr);
+  for (size_t i = 0; i < results.size(); ++i) {
+    napi_set_element(env, arr, static_cast<uint32_t>(i), MakeString(env, results[i]));
+  }
+  return arr;
+}
+
+static napi_value LoadsXml(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 1) {
+    ThrowTypeError(env, "loadsXml(xmlString) expects 1 argument");
+    return nullptr;
+  }
+  std::string xml_string;
+  if (!GetStringUtf8(env, argv[0], xml_string)) {
+    ThrowTypeError(env, "loadsXml expects string");
+    return nullptr;
+  }
+  auto result = llm_structured::loads_xml(xml_string);
+  napi_value obj;
+  napi_create_object(env, &obj);
+  napi_value ok_val;
+  napi_get_boolean(env, result.ok, &ok_val);
+  napi_set_named_property(env, obj, "ok", ok_val);
+  napi_set_named_property(env, obj, "error", MakeString(env, result.error));
+  if (result.ok && result.root) {
+    napi_set_named_property(env, obj, "root", XmlNodeToNapi(env, *result.root));
+  } else {
+    napi_value null_val;
+    napi_get_null(env, &null_val);
+    napi_set_named_property(env, obj, "root", null_val);
+  }
+  return obj;
+}
+
+static napi_value LoadsXmlEx(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "loadsXmlEx(xmlString, repair?) expects 1-2 arguments");
+    return nullptr;
+  }
+  std::string xml_string;
+  if (!GetStringUtf8(env, argv[0], xml_string)) {
+    ThrowTypeError(env, "loadsXmlEx expects string");
+    return nullptr;
+  }
+  llm_structured::XmlRepairConfig repair;
+  if (argc >= 2) {
+    if (!XmlRepairConfigFromNapi(env, argv[1], repair)) return nullptr;
+  }
+  auto result = llm_structured::loads_xml_ex(xml_string, repair);
+  napi_value obj;
+  napi_create_object(env, &obj);
+  napi_value ok_val;
+  napi_get_boolean(env, result.ok, &ok_val);
+  napi_set_named_property(env, obj, "ok", ok_val);
+  napi_set_named_property(env, obj, "error", MakeString(env, result.error));
+  if (result.ok && result.root) {
+    napi_set_named_property(env, obj, "root", XmlNodeToNapi(env, *result.root));
+  } else {
+    napi_value null_val;
+    napi_get_null(env, &null_val);
+    napi_set_named_property(env, obj, "root", null_val);
+  }
+  napi_set_named_property(env, obj, "metadata", XmlRepairMetadataToNapi(env, result.metadata));
+  return obj;
+}
+
+static napi_value LoadsHtml(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 1) {
+    ThrowTypeError(env, "loadsHtml(htmlString) expects 1 argument");
+    return nullptr;
+  }
+  std::string html_string;
+  if (!GetStringUtf8(env, argv[0], html_string)) {
+    ThrowTypeError(env, "loadsHtml expects string");
+    return nullptr;
+  }
+  auto result = llm_structured::loads_html(html_string);
+  napi_value obj;
+  napi_create_object(env, &obj);
+  napi_value ok_val;
+  napi_get_boolean(env, result.ok, &ok_val);
+  napi_set_named_property(env, obj, "ok", ok_val);
+  napi_set_named_property(env, obj, "error", MakeString(env, result.error));
+  if (result.ok && result.root) {
+    napi_set_named_property(env, obj, "root", XmlNodeToNapi(env, *result.root));
+  } else {
+    napi_value null_val;
+    napi_get_null(env, &null_val);
+    napi_set_named_property(env, obj, "root", null_val);
+  }
+  return obj;
+}
+
+static napi_value LoadsHtmlEx(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "loadsHtmlEx(htmlString, repair?) expects 1-2 arguments");
+    return nullptr;
+  }
+  std::string html_string;
+  if (!GetStringUtf8(env, argv[0], html_string)) {
+    ThrowTypeError(env, "loadsHtmlEx expects string");
+    return nullptr;
+  }
+  llm_structured::XmlRepairConfig repair;
+  if (argc >= 2) {
+    if (!XmlRepairConfigFromNapi(env, argv[1], repair)) return nullptr;
+  }
+  auto result = llm_structured::loads_html_ex(html_string, repair);
+  napi_value obj;
+  napi_create_object(env, &obj);
+  napi_value ok_val;
+  napi_get_boolean(env, result.ok, &ok_val);
+  napi_set_named_property(env, obj, "ok", ok_val);
+  napi_set_named_property(env, obj, "error", MakeString(env, result.error));
+  if (result.ok && result.root) {
+    napi_set_named_property(env, obj, "root", XmlNodeToNapi(env, *result.root));
+  } else {
+    napi_value null_val;
+    napi_get_null(env, &null_val);
+    napi_set_named_property(env, obj, "root", null_val);
+  }
+  napi_set_named_property(env, obj, "metadata", XmlRepairMetadataToNapi(env, result.metadata));
+  return obj;
+}
+
+static napi_value LoadsXmlAsJson(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 1) {
+    ThrowTypeError(env, "loadsXmlAsJson(xmlString) expects 1 argument");
+    return nullptr;
+  }
+  std::string xml_string;
+  if (!GetStringUtf8(env, argv[0], xml_string)) {
+    ThrowTypeError(env, "loadsXmlAsJson expects string");
+    return nullptr;
+  }
+  auto result = llm_structured::loads_xml_as_json(xml_string);
+  return ToNapi(env, result);
+}
+
+static napi_value LoadsHtmlAsJson(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 1) {
+    ThrowTypeError(env, "loadsHtmlAsJson(htmlString) expects 1 argument");
+    return nullptr;
+  }
+  std::string html_string;
+  if (!GetStringUtf8(env, argv[0], html_string)) {
+    ThrowTypeError(env, "loadsHtmlAsJson expects string");
+    return nullptr;
+  }
+  auto result = llm_structured::loads_html_as_json(html_string);
+  return ToNapi(env, result);
+}
+
+static napi_value DumpsXml(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "dumpsXml(node, indent?) expects 1-2 arguments");
+    return nullptr;
+  }
+  auto node = NapiToXmlNode(env, argv[0]);
+  int indent = 2;
+  if (argc >= 2) {
+    napi_get_value_int32(env, argv[1], &indent);
+  }
+  return MakeString(env, llm_structured::dumps_xml(node, indent));
+}
+
+static napi_value DumpsHtml(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 1 || argc > 2) {
+    ThrowTypeError(env, "dumpsHtml(node, indent?) expects 1-2 arguments");
+    return nullptr;
+  }
+  auto node = NapiToXmlNode(env, argv[0]);
+  int indent = 2;
+  if (argc >= 2) {
+    napi_get_value_int32(env, argv[1], &indent);
+  }
+  return MakeString(env, llm_structured::dumps_html(node, indent));
+}
+
+static napi_value QueryXml(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 2) {
+    ThrowTypeError(env, "queryXml(node, selector) expects 2 arguments");
+    return nullptr;
+  }
+  auto node = NapiToXmlNode(env, argv[0]);
+  std::string selector;
+  if (!GetStringUtf8(env, argv[1], selector)) {
+    ThrowTypeError(env, "queryXml expects string selector");
+    return nullptr;
+  }
+  auto results = llm_structured::query_xml(node, selector);
+  napi_value arr;
+  napi_create_array_with_length(env, results.size(), &arr);
+  for (size_t i = 0; i < results.size(); ++i) {
+    napi_set_element(env, arr, static_cast<uint32_t>(i), XmlNodeToNapi(env, results[i]));
+  }
+  return arr;
+}
+
+static napi_value XmlTextContent(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 1) {
+    ThrowTypeError(env, "xmlTextContent(node) expects 1 argument");
+    return nullptr;
+  }
+  auto node = NapiToXmlNode(env, argv[0]);
+  return MakeString(env, llm_structured::xml_text_content(node));
+}
+
+static napi_value XmlGetAttribute(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 2) {
+    ThrowTypeError(env, "xmlGetAttribute(node, attrName) expects 2 arguments");
+    return nullptr;
+  }
+  auto node = NapiToXmlNode(env, argv[0]);
+  std::string attr_name;
+  if (!GetStringUtf8(env, argv[1], attr_name)) {
+    ThrowTypeError(env, "xmlGetAttribute expects string attrName");
+    return nullptr;
+  }
+  auto result = llm_structured::xml_get_attribute(node, attr_name);
+  if (result) {
+    return MakeString(env, *result);
+  }
+  napi_value null_val;
+  napi_get_null(env, &null_val);
+  return null_val;
+}
+
+static napi_value ValidateXml(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 2) {
+    ThrowTypeError(env, "validateXml(node, schemaJson) expects 2 arguments");
+    return nullptr;
+  }
+  auto node = NapiToXmlNode(env, argv[0]);
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "validateXml expects string schemaJson");
+    return nullptr;
+  }
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    auto result = llm_structured::validate_xml(node, schema);
+    napi_value obj;
+    napi_create_object(env, &obj);
+    napi_value ok_val;
+    napi_get_boolean(env, result.ok, &ok_val);
+    napi_set_named_property(env, obj, "ok", ok_val);
+    napi_value errors;
+    napi_create_array_with_length(env, result.errors.size(), &errors);
+    for (size_t i = 0; i < result.errors.size(); ++i) {
+      napi_value err;
+      napi_create_object(env, &err);
+      napi_set_named_property(env, err, "path", MakeString(env, result.errors[i].path));
+      napi_set_named_property(env, err, "message", MakeString(env, result.errors[i].message));
+      napi_set_element(env, errors, static_cast<uint32_t>(i), err);
+    }
+    napi_set_named_property(env, obj, "errors", errors);
+    return obj;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "validation");
+    return nullptr;
+  }
+}
+
+static napi_value ParseAndValidateXml(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc != 2) {
+    ThrowTypeError(env, "parseAndValidateXml(xmlString, schemaJson) expects 2 arguments");
+    return nullptr;
+  }
+  std::string xml_string;
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[0], xml_string) || !GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseAndValidateXml expects strings");
+    return nullptr;
+  }
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    auto result = llm_structured::parse_and_validate_xml(xml_string, schema);
+    napi_value obj;
+    napi_create_object(env, &obj);
+    napi_value ok_val;
+    napi_get_boolean(env, result.ok, &ok_val);
+    napi_set_named_property(env, obj, "ok", ok_val);
+    napi_set_named_property(env, obj, "error", MakeString(env, result.error));
+    if (result.root) {
+      napi_set_named_property(env, obj, "root", XmlNodeToNapi(env, *result.root));
+    } else {
+      napi_value null_val;
+      napi_get_null(env, &null_val);
+      napi_set_named_property(env, obj, "root", null_val);
+    }
+    napi_value errors;
+    napi_create_array_with_length(env, result.validation_errors.size(), &errors);
+    for (size_t i = 0; i < result.validation_errors.size(); ++i) {
+      napi_value err;
+      napi_create_object(env, &err);
+      napi_set_named_property(env, err, "path", MakeString(env, result.validation_errors[i].path));
+      napi_set_named_property(env, err, "message", MakeString(env, result.validation_errors[i].message));
+      napi_set_element(env, errors, static_cast<uint32_t>(i), err);
+    }
+    napi_set_named_property(env, obj, "validation_errors", errors);
+    return obj;
+  } catch (const ValidationError& e) {
+    ThrowValidationError(env, e);
+    return nullptr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
+static napi_value ParseAndValidateXmlEx(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  if (argc < 2 || argc > 3) {
+    ThrowTypeError(env, "parseAndValidateXmlEx(xmlString, schemaJson, repair?) expects 2-3 arguments");
+    return nullptr;
+  }
+  std::string xml_string;
+  std::string schema_text;
+  if (!GetStringUtf8(env, argv[0], xml_string) || !GetStringUtf8(env, argv[1], schema_text)) {
+    ThrowTypeError(env, "parseAndValidateXmlEx expects strings");
+    return nullptr;
+  }
+  llm_structured::XmlRepairConfig repair;
+  if (argc >= 3) {
+    if (!XmlRepairConfigFromNapi(env, argv[2], repair)) return nullptr;
+  }
+  try {
+    Json schema = llm_structured::loads_jsonish(schema_text);
+    auto result = llm_structured::parse_and_validate_xml_ex(xml_string, schema, repair);
+    napi_value obj;
+    napi_create_object(env, &obj);
+    napi_value ok_val;
+    napi_get_boolean(env, result.ok, &ok_val);
+    napi_set_named_property(env, obj, "ok", ok_val);
+    napi_set_named_property(env, obj, "error", MakeString(env, result.error));
+    if (result.root) {
+      napi_set_named_property(env, obj, "root", XmlNodeToNapi(env, *result.root));
+    } else {
+      napi_value null_val;
+      napi_get_null(env, &null_val);
+      napi_set_named_property(env, obj, "root", null_val);
+    }
+    napi_value errors;
+    napi_create_array_with_length(env, result.validation_errors.size(), &errors);
+    for (size_t i = 0; i < result.validation_errors.size(); ++i) {
+      napi_value err;
+      napi_create_object(env, &err);
+      napi_set_named_property(env, err, "path", MakeString(env, result.validation_errors[i].path));
+      napi_set_named_property(env, err, "message", MakeString(env, result.validation_errors[i].message));
+      napi_set_element(env, errors, static_cast<uint32_t>(i), err);
+    }
+    napi_set_named_property(env, obj, "validation_errors", errors);
+    napi_set_named_property(env, obj, "metadata", XmlRepairMetadataToNapi(env, result.metadata));
+    return obj;
+  } catch (const ValidationError& e) {
+    ThrowValidationError(env, e);
+    return nullptr;
+  } catch (const std::exception& e) {
+    ThrowErrorWithKind(env, e.what(), "parse");
+    return nullptr;
+  }
+}
+
 static napi_value ParseAndValidateSql(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2];
@@ -1938,6 +3248,156 @@ static napi_value ParseAndValidateKv(napi_env env, napi_callback_info info) {
   }
 }
 
+// ---- Schema Inference helpers ----
+
+static llm_structured::SchemaInferenceConfig SchemaInferenceConfigFromNapi(napi_env env, napi_value cfg_val) {
+  llm_structured::SchemaInferenceConfig cfg;
+  if (cfg_val == nullptr) return cfg;
+  
+  napi_valuetype vt;
+  if (napi_typeof(env, cfg_val, &vt) != napi_ok || vt != napi_object) return cfg;
+  
+  auto get_bool = [&](const char* key, bool& out) {
+    napi_value v;
+    if (napi_get_named_property(env, cfg_val, key, &v) == napi_ok) {
+      napi_valuetype t;
+      if (napi_typeof(env, v, &t) == napi_ok && t == napi_boolean) {
+        napi_get_value_bool(env, v, &out);
+      }
+    }
+  };
+  
+  auto get_int = [&](const char* key, int& out) {
+    napi_value v;
+    if (napi_get_named_property(env, cfg_val, key, &v) == napi_ok) {
+      napi_valuetype t;
+      if (napi_typeof(env, v, &t) == napi_ok && t == napi_number) {
+        int32_t n;
+        napi_get_value_int32(env, v, &n);
+        out = n;
+      }
+    }
+  };
+  
+  get_bool("includeExamples", cfg.include_examples);
+  get_int("maxExamples", cfg.max_examples);
+  get_bool("includeDefault", cfg.include_default);
+  get_bool("inferFormats", cfg.infer_formats);
+  get_bool("inferPatterns", cfg.infer_patterns);
+  get_bool("inferNumericRanges", cfg.infer_numeric_ranges);
+  get_bool("inferStringLengths", cfg.infer_string_lengths);
+  get_bool("inferArrayLengths", cfg.infer_array_lengths);
+  get_bool("requiredByDefault", cfg.required_by_default);
+  get_bool("strictAdditionalProperties", cfg.strict_additional_properties);
+  get_bool("preferInteger", cfg.prefer_integer);
+  get_bool("allowAnyOf", cfg.allow_any_of);
+  get_bool("includeDescriptions", cfg.include_descriptions);
+  get_bool("detectEnums", cfg.detect_enums);
+  get_int("maxEnumValues", cfg.max_enum_values);
+  
+  return cfg;
+}
+
+static napi_value InferSchema(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  
+  if (argc < 1) {
+    ThrowTypeError(env, "inferSchema(value, config?) expects at least 1 argument");
+    return nullptr;
+  }
+  
+  llm_structured::Json value = NapiToJson(env, argv[0]);
+  llm_structured::SchemaInferenceConfig cfg;
+  if (argc >= 2) {
+    cfg = SchemaInferenceConfigFromNapi(env, argv[1]);
+  }
+  
+  try {
+    llm_structured::Json schema = llm_structured::infer_schema(value, cfg);
+    return JsonToNapi(env, schema);
+  } catch (const std::exception& e) {
+    ThrowError(env, e.what());
+    return nullptr;
+  }
+}
+
+static napi_value InferSchemaFromValues(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  
+  if (argc < 1) {
+    ThrowTypeError(env, "inferSchemaFromValues(values, config?) expects at least 1 argument");
+    return nullptr;
+  }
+  
+  // Check if first arg is an array
+  bool is_array = false;
+  napi_is_array(env, argv[0], &is_array);
+  if (!is_array) {
+    ThrowTypeError(env, "inferSchemaFromValues(values, config?) expects values to be an array");
+    return nullptr;
+  }
+  
+  uint32_t length;
+  napi_get_array_length(env, argv[0], &length);
+  
+  llm_structured::JsonArray values;
+  for (uint32_t i = 0; i < length; ++i) {
+    napi_value item;
+    napi_get_element(env, argv[0], i, &item);
+    values.push_back(NapiToJson(env, item));
+  }
+  
+  llm_structured::SchemaInferenceConfig cfg;
+  if (argc >= 2) {
+    cfg = SchemaInferenceConfigFromNapi(env, argv[1]);
+  }
+  
+  try {
+    llm_structured::Json schema = llm_structured::infer_schema_from_values(values, cfg);
+    return JsonToNapi(env, schema);
+  } catch (const std::exception& e) {
+    ThrowError(env, e.what());
+    return nullptr;
+  }
+}
+
+static napi_value MergeSchemas(napi_env env, napi_callback_info info) {
+  size_t argc = 3;
+  napi_value argv[3];
+  napi_value this_arg;
+  void* data;
+  if (napi_get_cb_info(env, info, &argc, argv, &this_arg, &data) != napi_ok) return nullptr;
+  
+  if (argc < 2) {
+    ThrowTypeError(env, "mergeSchemas(schema1, schema2, config?) expects at least 2 arguments");
+    return nullptr;
+  }
+  
+  llm_structured::Json schema1 = NapiToJson(env, argv[0]);
+  llm_structured::Json schema2 = NapiToJson(env, argv[1]);
+  
+  llm_structured::SchemaInferenceConfig cfg;
+  if (argc >= 3) {
+    cfg = SchemaInferenceConfigFromNapi(env, argv[2]);
+  }
+  
+  try {
+    llm_structured::Json merged = llm_structured::merge_schemas(schema1, schema2, cfg);
+    return JsonToNapi(env, merged);
+  } catch (const std::exception& e) {
+    ThrowError(env, e.what());
+    return nullptr;
+  }
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor props[] = {
       {"parseAndValidateJson", nullptr, ParseAndValidateJson, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1950,6 +3410,38 @@ static napi_value Init(napi_env env, napi_value exports) {
   {"parseAndValidateJsonWithDefaultsEx", nullptr, ParseAndValidateJsonWithDefaultsEx, nullptr, nullptr, nullptr, napi_default, nullptr},
   {"validateAllJson", nullptr, ValidateAllJson, nullptr, nullptr, nullptr, napi_default, nullptr},
   {"validateAllJsonValue", nullptr, ValidateAllJsonValue, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"extractYamlCandidate", nullptr, ExtractYamlCandidate, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"extractYamlCandidates", nullptr, ExtractYamlCandidates, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"loadsYamlishEx", nullptr, LoadsYamlishEx, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"loadsYamlishAllEx", nullptr, LoadsYamlishAllEx, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"dumpsYaml", nullptr, DumpsYaml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"parseAndValidateYaml", nullptr, ParseAndValidateYaml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"parseAndValidateYamlEx", nullptr, ParseAndValidateYamlEx, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"parseAndValidateYamlAllEx", nullptr, ParseAndValidateYamlAllEx, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"extractTomlCandidate", nullptr, ExtractTomlCandidate, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"extractTomlCandidates", nullptr, ExtractTomlCandidates, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"loadsTomlishEx", nullptr, LoadsTomlishEx, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"loadsTomlishAllEx", nullptr, LoadsTomlishAllEx, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"dumpsToml", nullptr, DumpsToml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"parseAndValidateToml", nullptr, ParseAndValidateToml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"parseAndValidateTomlEx", nullptr, ParseAndValidateTomlEx, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"parseAndValidateTomlAllEx", nullptr, ParseAndValidateTomlAllEx, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"extractXmlCandidate", nullptr, ExtractXmlCandidate, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"extractXmlCandidates", nullptr, ExtractXmlCandidates, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"loadsXml", nullptr, LoadsXml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"loadsXmlEx", nullptr, LoadsXmlEx, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"loadsHtml", nullptr, LoadsHtml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"loadsHtmlEx", nullptr, LoadsHtmlEx, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"loadsXmlAsJson", nullptr, LoadsXmlAsJson, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"loadsHtmlAsJson", nullptr, LoadsHtmlAsJson, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"dumpsXml", nullptr, DumpsXml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"dumpsHtml", nullptr, DumpsHtml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"queryXml", nullptr, QueryXml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"xmlTextContent", nullptr, XmlTextContent, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"xmlGetAttribute", nullptr, XmlGetAttribute, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"validateXml", nullptr, ValidateXml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"parseAndValidateXml", nullptr, ParseAndValidateXml, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"parseAndValidateXmlEx", nullptr, ParseAndValidateXmlEx, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"parseAndValidateSql", nullptr, ParseAndValidateSql, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"parseAndValidateMarkdown", nullptr, ParseAndValidateMarkdown, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"parseAndValidateKv", nullptr, ParseAndValidateKv, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1983,6 +3475,10 @@ static napi_value Init(napi_env env, napi_value exports) {
       {"sqlStreamParserAppend", nullptr, SqlStreamParserAppend, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"sqlStreamParserPoll", nullptr, SqlStreamParserPoll, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"sqlStreamParserLocation", nullptr, SqlStreamParserLocation, nullptr, nullptr, nullptr, napi_default, nullptr},
+      // Schema Inference
+      {"inferSchema", nullptr, InferSchema, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"inferSchemaFromValues", nullptr, InferSchemaFromValues, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"mergeSchemas", nullptr, MergeSchemas, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
 
   napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props);

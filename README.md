@@ -46,6 +46,81 @@ Duplicate keys inside objects are handled via `duplicateKeyPolicy`:
 - `lastWins`: overwrite with the last occurrence
 - `error`: reject and raise a parse error with a specific key path (for example `$.a`)
 
+### YAML-ish parsing
+
+Parse YAML from LLM output with automatic repairs:
+
+- Extract YAML from `\`\`\`yaml` or `\`\`\`yml` fenced blocks
+- Extract multiple YAML documents (separated by `---`)
+- Fix tabs → spaces and normalize indentation
+- Allow inline JSON objects/arrays within YAML
+- Validate against JSON Schema (same as JSON)
+
+Repairs are configurable via `YamlRepairConfig`:
+
+- `fixTabs`: convert tabs to spaces
+- `normalizeIndentation`: ensure consistent spacing
+- `fixUnquotedValues`: handle unquoted special characters
+- `allowInlineJson`: permit JSON-style syntax within YAML
+- `quoteAmbiguousStrings`: auto-quote strings that could be numbers/booleans
+
+APIs mirror JSON-ish pattern:
+- C++: `loads_yamlish`, `loads_yamlish_ex`, `parse_and_validate_yaml`, `dumps_yaml`
+- Python: `loads_yamlish`, `parse_and_validate_yaml`, `dumps_yaml`
+- TypeScript: `loadsYamlish`, `parseAndValidateYaml`, `dumpsYaml`
+
+### TOML-ish parsing
+
+Parse TOML from LLM output with automatic repairs:
+
+- Extract TOML from `\`\`\`toml` fenced blocks
+- Support for standard tables `[section]` and arrays of tables `[[items]]`
+- Handle dotted keys (`a.b.c = value`)
+- Parse inline tables and inline arrays
+- Support for all TOML value types (strings, numbers, booleans, dates)
+- Convert single quotes to double quotes
+- Normalize whitespace (tabs to spaces)
+- Validate against JSON Schema (same as JSON)
+
+Repairs are configurable via `TomlRepairConfig`:
+
+- `fixUnquotedStrings`: handle unquoted string values
+- `allowSingleQuotes`: convert single quotes to double quotes
+- `normalizeWhitespace`: convert tabs to spaces
+- `fixTableNames`: auto-fix table names with special characters
+- `allowMultilineInlineTables`: permit multiline inline tables
+
+APIs mirror JSON-ish pattern:
+- C++: `loads_tomlish`, `loads_tomlish_ex`, `parse_and_validate_toml`, `dumps_toml`
+- Python: `loads_tomlish`, `parse_and_validate_toml`, `dumps_toml`
+- TypeScript: `loadsTomlish`, `parseAndValidateToml`, `dumpsToml`
+
+### XML / HTML parsing
+
+Parse XML and HTML from LLM output with automatic repairs:
+
+- Extract XML/HTML from `\`\`\`xml` or `\`\`\`html` fenced blocks
+- Parse well-formed XML and lenient HTML (auto-close tags, unquoted attributes)
+- Support for elements, text, comments, CDATA, processing instructions, and doctypes
+- Query nodes with CSS-like selectors (`query_xml`)
+- Convert XML to JSON representation (`xml_to_json`)
+- Extract text content from node trees (`xml_text_content`)
+- Validate against JSON Schema (same as JSON)
+
+Repairs are configurable via `XmlRepairConfig`:
+
+- `html_mode`: enable HTML-specific parsing (void elements, optional closing tags)
+- `fix_unquoted_attributes`: handle `<div class=foo>` style attributes
+- `auto_close_tags`: automatically close unclosed tags
+- `normalize_whitespace`: normalize whitespace in text nodes
+- `lowercase_names`: convert tag/attribute names to lowercase
+- `decode_entities`: decode HTML entities (`&amp;` → `&`)
+
+APIs mirror JSON-ish pattern:
+- C++: `loads_xml`, `loads_xml_ex`, `loads_html`, `loads_html_ex`, `xml_to_json`, `dumps_xml`, `dumps_html`, `query_xml`, `validate_xml`, `parse_and_validate_xml`
+- Python: `loads_xml`, `loads_xml_ex`, `loads_html`, `loads_html_ex`, `xml_to_json`, `dumps_xml`, `dumps_html`, `query_xml`, `validate_xml`, `parse_and_validate_xml`
+- TypeScript: `loadsXml`, `loadsXmlEx`, `loadsHtml`, `loadsHtmlEx`, `xmlToJson`, `dumpsXml`, `dumpsHtml`, `queryXml`, `validateXml`, `parseAndValidateXml`
+
 ### Multi-JSON-block parsing (parse *all* blocks)
 
 If your input contains multiple JSON blobs (for example, several \`\`\`json fences plus inline `{...}` / `[...]`), you can extract/parse **all** blocks instead of only the first one.
@@ -88,6 +163,53 @@ For LLM streaming output, the library provides incremental parsers/collectors:
 - SQL: incremental parsing/validation for streaming SQL output
 
 Core methods are consistent across languages: `append(...)`, `poll()`, plus `finish()`/`close()` and `location()`.
+
+### Schema Inference
+
+Automatically infer JSON Schema from example values:
+
+- Infer type, format, and constraints from one or more sample values
+- Detect common string formats: `date-time`, `date`, `time`, `email`, `uri`, `uuid`, `ipv4`, `hostname`
+- Merge schemas from multiple examples (intersection of required fields, union of properties)
+- Detect enums from repeated string values
+- Configurable via `SchemaInferenceConfig`:
+
+Options:
+
+- `include_examples`: include sample values in `examples` array
+- `max_examples`: maximum number of examples to collect (default: 5)
+- `include_default`: include first seen value as `default`
+- `infer_formats`: detect string formats (email, uri, date-time, etc.)
+- `infer_patterns`: generate regex patterns from string values
+- `infer_numeric_ranges`: add `minimum`/`maximum` from observed values
+- `infer_string_lengths`: add `minLength`/`maxLength` from observed values
+- `infer_array_lengths`: add `minItems`/`maxItems` from observed arrays
+- `required_by_default`: mark all properties as required (default: true)
+- `strict_additional_properties`: set `additionalProperties: false` (default: true)
+- `prefer_integer`: use `integer` type for whole numbers (default: true)
+- `allow_any_of`: use `anyOf` for mixed types (default: true)
+- `detect_enums`: detect enum values from repeated strings (default: false)
+- `max_enum_values`: max unique values to consider as enum (default: 10)
+
+APIs:
+
+- C++: `infer_schema`, `infer_schema_from_values`, `merge_schemas`
+- Python: `infer_schema`, `infer_schema_from_values`, `merge_schemas`
+- TypeScript: `inferSchema`, `inferSchemaFromValues`, `mergeSchemas`
+
+**Works with YAML and TOML too:** Schema inference operates on parsed values, so you can infer schemas from YAML/TOML by parsing first:
+
+```python
+# YAML → Schema
+yaml_value = loads_yamlish("name: Alice\nage: 30")
+schema = infer_schema(yaml_value)
+
+# TOML → Schema
+toml_value = loads_tomlish('[user]\nname = "Alice"')
+schema = infer_schema(toml_value)
+```
+
+**Note:** XML/HTML have a different structure (attributes, mixed content) and cannot be directly mapped to JSON Schema.
 
 ### Cross-language consistency + CLI
 
@@ -401,6 +523,336 @@ try {
 }
 ```
 
+## Example 1c: parse + validate YAML from LLM output (C++ / Python / TypeScript)
+
+The library also supports YAML parsing with automatic repairs for common LLM output issues:
+
+- Extracts YAML from `\`\`\`yaml` fenced blocks
+- Fixes tabs and mixed indentation
+- Allows inline JSON within YAML
+- Validates against JSON Schema
+
+Input YAML:
+
+````yaml
+```yaml
+users:
+  - name: Alice
+    age: 30
+  - name: Bob
+    age: 25
+```
+````
+
+### C++ (YAML)
+
+```cpp
+#include "llm_structured.hpp"
+
+int main() {
+  llm_structured::Json schema = llm_structured::loads_jsonish(R"JSON(
+{
+  "type": "object",
+  "required": ["users"],
+  "properties": {
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "age"],
+        "properties": {
+          "name": {"type": "string"},
+          "age": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}
+)JSON");
+
+  const std::string fence_open = std::string("`") + "``yaml\n";
+  const std::string fence_close = std::string("`") + "``\n";
+  const std::string yaml_text =
+      fence_open +
+      "users:\n"
+      "  - name: Alice\n"
+      "    age: 30\n"
+      "  - name: Bob\n"
+      "    age: 25\n" +
+      fence_close;
+
+  try {
+    auto obj = llm_structured::parse_and_validate_yaml(yaml_text, schema);
+    
+    // Serialize back to YAML
+    std::string yaml_out = llm_structured::dumps_yaml(obj);
+    (void)yaml_out;
+  } catch (const llm_structured::ValidationError& e) {
+    // e.kind / e.path
+    throw;
+  }
+}
+```
+
+### Python (YAML)
+
+```python
+from llm_structured import parse_and_validate_yaml, dumps_yaml, ValidationError
+
+schema = {
+    "type": "object",
+    "required": ["users"],
+    "properties": {
+        "users": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "age"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "age": {"type": "integer", "minimum": 0},
+                },
+            },
+        },
+    },
+}
+
+yaml_text = """
+```yaml
+users:
+  - name: Alice
+    age: 30
+  - name: Bob
+    age: 25
+```
+"""
+
+try:
+    obj = parse_and_validate_yaml(yaml_text, schema)
+    print(obj)
+    
+    # Serialize back to YAML
+    yaml_out = dumps_yaml(obj)
+    print(yaml_out)
+except ValidationError as e:
+    # e.kind / e.path / e.jsonPointer
+    raise
+```
+
+### TypeScript (YAML)
+
+```ts
+import { parseAndValidateYaml, dumpsYaml, type ValidationError } from "./src/index";
+
+const schema = {
+  type: "object",
+  required: ["users"],
+  properties: {
+    users: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["name", "age"],
+        properties: {
+          name: { type: "string" },
+          age: { type: "integer", minimum: 0 },
+        },
+      },
+    },
+  },
+} as const;
+
+const yamlText = `
+\`\`\`yaml
+users:
+  - name: Alice
+    age: 30
+  - name: Bob
+    age: 25
+\`\`\`
+`;
+
+try {
+  const obj = parseAndValidateYaml(yamlText, schema);
+  console.log(obj);
+  
+  // Serialize back to YAML
+  const yamlOut = dumpsYaml(obj);
+  console.log(yamlOut);
+} catch (e) {
+  const err = e as ValidationError;
+  throw err;
+}
+```
+
+## Example 1d: parse + validate XML/HTML from LLM output (C++ / Python / TypeScript)
+
+The library supports XML and HTML parsing with automatic repairs:
+
+- Extracts from `\`\`\`xml` or `\`\`\`html` fenced blocks
+- Handles malformed HTML (unclosed tags, unquoted attributes)
+- Query nodes with CSS-like selectors
+- Validates against JSON Schema
+
+Input XML:
+
+````xml
+```xml
+<config>
+  <server host="localhost" port="8080"/>
+  <database>
+    <connection>postgresql://localhost/db</connection>
+  </database>
+</config>
+```
+````
+
+### C++ (XML)
+
+```cpp
+#include "llm_structured.hpp"
+
+int main() {
+  const std::string fence_open = std::string("`") + "``xml\n";
+  const std::string fence_close = std::string("`") + "``\n";
+  const std::string xml_text =
+      fence_open +
+      "<config>\n"
+      "  <server host=\"localhost\" port=\"8080\"/>\n"
+      "  <database>\n"
+      "    <connection>postgresql://localhost/db</connection>\n"
+      "  </database>\n"
+      "</config>\n" +
+      fence_close;
+
+  // Parse XML
+  auto root = llm_structured::loads_xml(xml_text);
+
+  // Query nodes by tag name
+  auto servers = llm_structured::query_xml(root, "server");
+
+  // Get attribute
+  std::string host = llm_structured::xml_get_attribute(servers[0], "host");
+
+  // Get text content
+  std::string text = llm_structured::xml_text_content(root);
+
+  // Convert to JSON representation
+  auto json = llm_structured::xml_to_json(root);
+
+  // Serialize back to XML
+  std::string xml_out = llm_structured::dumps_xml(root);
+
+  return 0;
+}
+```
+
+### Python (XML)
+
+```python
+from llm_structured import (
+    loads_xml, loads_html, query_xml, xml_get_attribute,
+    xml_text_content, xml_to_json, dumps_xml, dumps_html
+)
+
+xml_text = """
+```xml
+<config>
+  <server host="localhost" port="8080"/>
+  <database>
+    <connection>postgresql://localhost/db</connection>
+  </database>
+</config>
+```
+"""
+
+# Parse XML
+result = loads_xml(xml_text)
+if result["ok"]:
+    root = result["root"]
+    
+    # Query nodes by tag name
+    servers = query_xml(root, "server")
+    print(f"Found {len(servers)} server(s)")
+    
+    # Get attribute
+    host = xml_get_attribute(servers[0], "host")
+    print(f"Host: {host}")
+    
+    # Get all text content
+    text = xml_text_content(root)
+    print(f"Text: {text}")
+    
+    # Convert to JSON representation
+    json_repr = xml_to_json(xml_text)
+    print(f"JSON: {json_repr}")
+    
+    # Serialize back to XML
+    xml_out = dumps_xml(root)
+    print(xml_out)
+
+# Parse HTML with lenient mode
+html_text = '<div class=container><p>Hello <b>World</b></div>'
+result = loads_html(html_text)
+if result["ok"]:
+    html_out = dumps_html(result["root"])
+    print(html_out)
+```
+
+### TypeScript (XML)
+
+```ts
+import {
+  loadsXml, loadsHtml, queryXml, xmlGetAttribute,
+  xmlTextContent, xmlToJson, dumpsXml, dumpsHtml
+} from "./src/index";
+
+const xmlText = `
+\`\`\`xml
+<config>
+  <server host="localhost" port="8080"/>
+  <database>
+    <connection>postgresql://localhost/db</connection>
+  </database>
+</config>
+\`\`\`
+`;
+
+// Parse XML
+const result = loadsXml(xmlText);
+if (result.ok) {
+  const root = result.root;
+  
+  // Query nodes by tag name
+  const servers = queryXml(root, "server");
+  console.log(`Found ${servers.length} server(s)`);
+  
+  // Get attribute
+  const host = xmlGetAttribute(servers[0], "host");
+  console.log(`Host: ${host}`);
+  
+  // Get all text content
+  const text = xmlTextContent(root);
+  console.log(`Text: ${text}`);
+  
+  // Convert to JSON representation
+  const jsonRepr = xmlToJson(xmlText);
+  console.log("JSON:", jsonRepr);
+  
+  // Serialize back to XML
+  const xmlOut = dumpsXml(root);
+  console.log(xmlOut);
+}
+
+// Parse HTML with lenient mode
+const htmlText = '<div class=container><p>Hello <b>World</b></div>';
+const htmlResult = loadsHtml(htmlText);
+if (htmlResult.ok) {
+  const htmlOut = dumpsHtml(htmlResult.root);
+  console.log(htmlOut);
+}
+```
+
 ## Example 2: validate SQL against an allowlist (C++ / Python / TypeScript)
 
 This example enforces a conservative policy:
@@ -497,6 +949,105 @@ try {
   const err = e as ValidationError;
   throw err;
 }
+```
+
+## Example 3: Schema Inference (Python / TypeScript)
+
+Automatically infer JSON Schema from example values.
+
+### Python (Schema Inference)
+
+```python
+from llm_structured import infer_schema, infer_schema_from_values, merge_schemas
+import json
+
+# Infer schema from a single value
+value = {
+    "name": "Alice",
+    "age": 30,
+    "email": "alice@example.com",
+    "created_at": "2024-01-15T10:30:00Z"
+}
+
+schema = infer_schema(value)
+print(json.dumps(schema, indent=2))
+# Output:
+# {
+#   "type": "object",
+#   "properties": {
+#     "name": {"type": "string"},
+#     "age": {"type": "integer"},
+#     "email": {"type": "string", "format": "email"},
+#     "created_at": {"type": "string", "format": "date-time"}
+#   },
+#   "required": ["name", "age", "email", "created_at"],
+#   "additionalProperties": false
+# }
+
+# Infer schema from multiple values (merges properties)
+values = [
+    {"name": "Alice", "age": 30},
+    {"name": "Bob", "age": 25, "city": "NYC"},
+    {"name": "Carol", "age": 35}
+]
+
+schema = infer_schema_from_values(values)
+# Properties are merged; required = intersection of all examples
+
+# Custom config
+config = {
+    "infer_formats": True,
+    "infer_numeric_ranges": True,
+    "include_examples": True,
+    "max_examples": 3,
+    "detect_enums": True,
+    "max_enum_values": 10
+}
+schema = infer_schema(value, config)
+
+# Merge two schemas
+schema1 = {"type": "object", "properties": {"a": {"type": "string"}}}
+schema2 = {"type": "object", "properties": {"b": {"type": "number"}}}
+merged = merge_schemas(schema1, schema2)
+```
+
+### TypeScript (Schema Inference)
+
+```ts
+import { inferSchema, inferSchemaFromValues, mergeSchemas } from "./src/index";
+
+// Infer schema from a single value
+const value = {
+  name: "Alice",
+  age: 30,
+  email: "alice@example.com",
+  createdAt: "2024-01-15T10:30:00Z"
+};
+
+const schema = inferSchema(value);
+console.log(JSON.stringify(schema, null, 2));
+
+// Infer from multiple values
+const values = [
+  { name: "Alice", age: 30 },
+  { name: "Bob", age: 25, city: "NYC" }
+];
+
+const mergedSchema = inferSchemaFromValues(values);
+
+// Custom config
+const config = {
+  inferFormats: true,
+  inferNumericRanges: true,
+  includeExamples: true,
+  detectEnums: true
+};
+const schemaWithConfig = inferSchema(value, config);
+
+// Merge schemas
+const schema1 = { type: "object", properties: { a: { type: "string" } } };
+const schema2 = { type: "object", properties: { b: { type: "number" } } };
+const merged = mergeSchemas(schema1, schema2);
 ```
 
 ## CLI (C++)

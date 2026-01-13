@@ -11,12 +11,46 @@ const native = require(path.join(__dirname, "..", "..", "build", "Release", "add
   parseAndValidateJsonWithDefaults(text: string, schemaJson: string): JsonValue;
 
   extractJsonCandidates(text: string): string[];
+  extractYamlCandidate(text: string): string;
+  extractYamlCandidates(text: string): string[];
+  extractTomlCandidate(text: string): string;
+  extractTomlCandidates(text: string): string[];
 
   loadsJsonishEx(text: string, repair?: RepairConfig): JsonishParseResult;
   loadsJsonishAllEx(text: string, repair?: RepairConfig): JsonishParseAllResult;
+  loadsYamlishEx(text: string, repair?: YamlRepairConfig): YamlishParseResult;
+  loadsYamlishAllEx(text: string, repair?: YamlRepairConfig): YamlishParseAllResult;
+  loadsTomlishEx(text: string, repair?: TomlRepairConfig): TomlishParseResult;
+  loadsTomlishAllEx(text: string, repair?: TomlRepairConfig): TomlishParseAllResult;
   parseAndValidateJsonEx(text: string, schemaJson: string, repair?: RepairConfig): JsonishParseResult;
   parseAndValidateJsonAllEx(text: string, schemaJson: string, repair?: RepairConfig): JsonishParseAllResult;
   parseAndValidateJsonWithDefaultsEx(text: string, schemaJson: string, repair?: RepairConfig): JsonishParseResult;
+  parseAndValidateYaml(text: string, schemaJson: string): JsonValue;
+  parseAndValidateYamlEx(text: string, schemaJson: string, repair?: YamlRepairConfig): YamlishParseResult;
+  parseAndValidateYamlAllEx(text: string, schemaJson: string, repair?: YamlRepairConfig): YamlishParseAllResult;
+  parseAndValidateToml(text: string, schemaJson: string): JsonValue;
+  parseAndValidateTomlEx(text: string, schemaJson: string, repair?: TomlRepairConfig): TomlishParseResult;
+  parseAndValidateTomlAllEx(text: string, schemaJson: string, repair?: TomlRepairConfig): TomlishParseAllResult;
+  dumpsYaml(value: JsonValue, indent?: number): string;
+  dumpsToml(value: JsonValue): string;
+
+  // XML / HTML functions
+  extractXmlCandidate(text: string, rootTag?: string): string;
+  extractXmlCandidates(text: string, rootTag?: string): string[];
+  loadsXml(xmlString: string): XmlParseResult;
+  loadsXmlEx(xmlString: string, repair?: XmlRepairConfig): XmlParseResultEx;
+  loadsHtml(htmlString: string): XmlParseResult;
+  loadsHtmlEx(htmlString: string, repair?: XmlRepairConfig): XmlParseResultEx;
+  loadsXmlAsJson(xmlString: string): JsonValue;
+  loadsHtmlAsJson(htmlString: string): JsonValue;
+  dumpsXml(node: XmlNode, indent?: number): string;
+  dumpsHtml(node: XmlNode, indent?: number): string;
+  queryXml(node: XmlNode, selector: string): XmlNode[];
+  xmlTextContent(node: XmlNode): string;
+  xmlGetAttribute(node: XmlNode, attrName: string): string | null;
+  validateXml(node: XmlNode, schemaJson: string): XmlValidationResult;
+  parseAndValidateXml(xmlString: string, schemaJson: string): XmlParseAndValidateResult;
+  parseAndValidateXmlEx(xmlString: string, schemaJson: string, repair?: XmlRepairConfig): XmlParseAndValidateResultEx;
 
   validateAllJson(text: string, schemaJson: string): Array<NativeValidationError & { jsonPointer?: string }>;
   validateAllJsonValue(value: JsonValue, schemaJson: string): Array<NativeValidationError & { jsonPointer?: string }>;
@@ -77,6 +111,11 @@ const native = require(path.join(__dirname, "..", "..", "build", "Release", "add
   sqlStreamParserAppend(parser: unknown, chunk: string): void;
   sqlStreamParserPoll(parser: unknown): { done: boolean; ok: boolean; value: SqlParsed | null; error: NativeValidationError | null };
   sqlStreamParserLocation(parser: unknown): StreamLocation;
+
+  // Schema Inference
+  inferSchema(value: JsonValue, config?: SchemaInferenceConfig): JsonObject;
+  inferSchemaFromValues(values: JsonValue[], config?: SchemaInferenceConfig): JsonObject;
+  mergeSchemas(schema1: JsonObject, schema2: JsonObject, config?: SchemaInferenceConfig): JsonObject;
 };
 
 export type JsonPrimitive = null | boolean | number | string;
@@ -132,6 +171,180 @@ export interface RepairMetadata {
 
   // Which duplicate key policy was applied during parsing.
   duplicateKeyPolicy: "firstWins" | "lastWins" | "error";
+}
+
+export interface YamlRepairConfig {
+  fixTabs?: boolean;
+  normalizeIndentation?: boolean;
+  fixUnquotedValues?: boolean;
+  allowInlineJson?: boolean;
+  quoteAmbiguousStrings?: boolean;
+}
+
+export interface YamlRepairMetadata {
+  extractedFromFence: boolean;
+  fixedTabs: boolean;
+  normalizedIndentation: boolean;
+  fixedUnquotedValues: boolean;
+  convertedInlineJson: boolean;
+  quotedAmbiguousStrings: boolean;
+}
+
+export interface YamlishParseResult {
+  value: JsonValue;
+  fixed: string;
+  metadata: YamlRepairMetadata;
+}
+
+export interface YamlishParseAllResult {
+  values: JsonValue[];
+  fixed: string[];
+  metadata: YamlRepairMetadata[];
+}
+
+export interface TomlRepairConfig {
+  fixUnquotedStrings?: boolean;
+  allowSingleQuotes?: boolean;
+  normalizeWhitespace?: boolean;
+  fixTableNames?: boolean;
+  allowMultilineInlineTables?: boolean;
+}
+
+export interface TomlRepairMetadata {
+  extractedFromFence: boolean;
+  fixedUnquotedStrings: boolean;
+  convertedSingleQuotes: boolean;
+  normalizedWhitespace: boolean;
+  fixedTableNames: boolean;
+  convertedMultilineInline: boolean;
+}
+
+export interface TomlishParseResult {
+  value: JsonValue;
+  fixed: string;
+  metadata: TomlRepairMetadata;
+}
+
+export interface TomlishParseAllResult {
+  values: JsonValue[];
+  fixed: string[];
+  metadata: TomlRepairMetadata[];
+}
+
+// ---- XML / HTML types ----
+
+export type XmlNodeType = 'element' | 'text' | 'comment' | 'cdata' | 'processing_instruction' | 'doctype';
+
+export interface XmlNode {
+  type: XmlNodeType;
+  name: string;
+  text: string;
+  attributes: Record<string, string>;
+  children: XmlNode[];
+}
+
+export interface XmlRepairConfig {
+  html_mode?: boolean;
+  fix_unquoted_attributes?: boolean;
+  auto_close_tags?: boolean;
+  normalize_whitespace?: boolean;
+  lowercase_names?: boolean;
+  decode_entities?: boolean;
+}
+
+export interface XmlRepairMetadata {
+  auto_closed_tags: number;
+  fixed_attributes: number;
+  decoded_entities: number;
+  normalized_whitespace: number;
+}
+
+export interface XmlParseResult {
+  ok: boolean;
+  error: string;
+  root: XmlNode | null;
+}
+
+export interface XmlParseResultEx {
+  ok: boolean;
+  error: string;
+  root: XmlNode | null;
+  metadata: XmlRepairMetadata;
+}
+
+export interface XmlValidationError {
+  path: string;
+  message: string;
+}
+
+export interface XmlValidationResult {
+  ok: boolean;
+  errors: XmlValidationError[];
+}
+
+export interface XmlParseAndValidateResult {
+  ok: boolean;
+  error: string;
+  root: XmlNode | null;
+  validation_errors: XmlValidationError[];
+}
+
+export interface XmlParseAndValidateResultEx {
+  ok: boolean;
+  error: string;
+  root: XmlNode | null;
+  validation_errors: XmlValidationError[];
+  metadata: XmlRepairMetadata;
+}
+
+export interface XmlSchema {
+  element?: string;
+  requiredAttributes?: string[];
+  attributes?: Record<string, {
+    pattern?: string;
+    enum?: string[];
+  }>;
+  children?: {
+    minItems?: number;
+    maxItems?: number;
+    required?: string[];
+  };
+  childSchema?: Record<string, XmlSchema>;
+}
+
+// ---- Schema Inference types ----
+
+export interface SchemaInferenceConfig {
+  /** Include "examples" array with sample values (up to maxExamples) */
+  includeExamples?: boolean;
+  /** Maximum number of examples to include (default: 3) */
+  maxExamples?: number;
+  /** Include "default" from the first seen value */
+  includeDefault?: boolean;
+  /** Infer "format" for strings (e.g., "date-time", "email", "uri") */
+  inferFormats?: boolean;
+  /** Infer "pattern" for strings that look like specific formats */
+  inferPatterns?: boolean;
+  /** Infer numeric constraints (minimum, maximum) from seen values */
+  inferNumericRanges?: boolean;
+  /** Infer string constraints (minLength, maxLength) from seen values */
+  inferStringLengths?: boolean;
+  /** Infer array constraints (minItems, maxItems) from seen values */
+  inferArrayLengths?: boolean;
+  /** Make all object properties required by default (default: true) */
+  requiredByDefault?: boolean;
+  /** Set additionalProperties to false by default (default: true) */
+  strictAdditionalProperties?: boolean;
+  /** Prefer "integer" over "number" when all values are whole numbers (default: true) */
+  preferInteger?: boolean;
+  /** Merge multiple types into anyOf when values have different types (default: true) */
+  allowAnyOf?: boolean;
+  /** Include "description" placeholders for properties */
+  includeDescriptions?: boolean;
+  /** Detect enum values when all values are from a small set of strings (default: true) */
+  detectEnums?: boolean;
+  /** Max distinct values for enum detection (default: 10) */
+  maxEnumValues?: number;
 }
 
 export interface JsonishParseResult {
@@ -329,6 +542,170 @@ export function parseAndValidateJsonAllEx(text: string, schema: JsonSchema, repa
 
 export function parseAndValidateJsonWithDefaultsEx(text: string, schema: JsonSchema, repair?: RepairConfig): JsonishParseResult {
   return native.parseAndValidateJsonWithDefaultsEx(text, JSON.stringify(schema), repair);
+}
+
+// ---- YAML APIs ----
+
+export function extractYamlCandidate(text: string): string {
+  return native.extractYamlCandidate(text);
+}
+
+export function extractYamlCandidates(text: string): string[] {
+  return native.extractYamlCandidates(text);
+}
+
+export function loadsYamlish(text: string, repair?: YamlRepairConfig): JsonValue {
+  return native.loadsYamlishEx(text, repair).value;
+}
+
+export function loadsYamlishEx(text: string, repair?: YamlRepairConfig): YamlishParseResult {
+  return native.loadsYamlishEx(text, repair);
+}
+
+export function loadsYamlishAll(text: string, repair?: YamlRepairConfig): JsonValue[] {
+  return native.loadsYamlishAllEx(text, repair).values;
+}
+
+export function loadsYamlishAllEx(text: string, repair?: YamlRepairConfig): YamlishParseAllResult {
+  return native.loadsYamlishAllEx(text, repair);
+}
+
+export function dumpsYaml(value: JsonValue, indent: number = 2): string {
+  return native.dumpsYaml(value, indent);
+}
+
+export function parseAndValidateYaml(text: string, schema: JsonSchema, repair?: YamlRepairConfig): JsonValue {
+  if (repair) {
+    return native.parseAndValidateYamlEx(text, JSON.stringify(schema), repair).value;
+  }
+  return native.parseAndValidateYaml(text, JSON.stringify(schema));
+}
+
+export function parseAndValidateYamlEx(text: string, schema: JsonSchema, repair?: YamlRepairConfig): YamlishParseResult {
+  return native.parseAndValidateYamlEx(text, JSON.stringify(schema), repair);
+}
+
+export function parseAndValidateYamlAll(text: string, schema: JsonSchema, repair?: YamlRepairConfig): JsonValue[] {
+  return native.parseAndValidateYamlAllEx(text, JSON.stringify(schema), repair).values;
+}
+
+export function parseAndValidateYamlAllEx(text: string, schema: JsonSchema, repair?: YamlRepairConfig): YamlishParseAllResult {
+  return native.parseAndValidateYamlAllEx(text, JSON.stringify(schema), repair);
+}
+
+// ---- TOML ----
+
+export function extractTomlCandidate(text: string): string {
+  return native.extractTomlCandidate(text);
+}
+
+export function extractTomlCandidates(text: string): string[] {
+  return native.extractTomlCandidates(text);
+}
+
+export function loadsTomlish(text: string, repair?: TomlRepairConfig): JsonValue {
+  return native.loadsTomlishEx(text, repair).value;
+}
+
+export function loadsTomlishEx(text: string, repair?: TomlRepairConfig): TomlishParseResult {
+  return native.loadsTomlishEx(text, repair);
+}
+
+export function loadsTomlishAll(text: string, repair?: TomlRepairConfig): JsonValue[] {
+  return native.loadsTomlishAllEx(text, repair).values;
+}
+
+export function loadsTomlishAllEx(text: string, repair?: TomlRepairConfig): TomlishParseAllResult {
+  return native.loadsTomlishAllEx(text, repair);
+}
+
+export function dumpsToml(value: JsonValue): string {
+  return native.dumpsToml(value);
+}
+
+export function parseAndValidateToml(text: string, schema: JsonSchema, repair?: TomlRepairConfig): JsonValue {
+  if (repair) {
+    return native.parseAndValidateTomlEx(text, JSON.stringify(schema), repair).value;
+  }
+  return native.parseAndValidateToml(text, JSON.stringify(schema));
+}
+
+export function parseAndValidateTomlEx(text: string, schema: JsonSchema, repair?: TomlRepairConfig): TomlishParseResult {
+  return native.parseAndValidateTomlEx(text, JSON.stringify(schema), repair);
+}
+
+export function parseAndValidateTomlAll(text: string, schema: JsonSchema, repair?: TomlRepairConfig): JsonValue[] {
+  return native.parseAndValidateTomlAllEx(text, JSON.stringify(schema), repair).values;
+}
+
+export function parseAndValidateTomlAllEx(text: string, schema: JsonSchema, repair?: TomlRepairConfig): TomlishParseAllResult {
+  return native.parseAndValidateTomlAllEx(text, JSON.stringify(schema), repair);
+}
+
+// ---- XML / HTML functions ----
+
+export function extractXmlCandidate(text: string, rootTag?: string): string {
+  return native.extractXmlCandidate(text, rootTag);
+}
+
+export function extractXmlCandidates(text: string, rootTag?: string): string[] {
+  return native.extractXmlCandidates(text, rootTag);
+}
+
+export function loadsXml(xmlString: string): XmlParseResult {
+  return native.loadsXml(xmlString);
+}
+
+export function loadsXmlEx(xmlString: string, repair?: XmlRepairConfig): XmlParseResultEx {
+  return native.loadsXmlEx(xmlString, repair);
+}
+
+export function loadsHtml(htmlString: string): XmlParseResult {
+  return native.loadsHtml(htmlString);
+}
+
+export function loadsHtmlEx(htmlString: string, repair?: XmlRepairConfig): XmlParseResultEx {
+  return native.loadsHtmlEx(htmlString, repair);
+}
+
+export function loadsXmlAsJson(xmlString: string): JsonValue {
+  return native.loadsXmlAsJson(xmlString);
+}
+
+export function loadsHtmlAsJson(htmlString: string): JsonValue {
+  return native.loadsHtmlAsJson(htmlString);
+}
+
+export function dumpsXml(node: XmlNode, indent?: number): string {
+  return native.dumpsXml(node, indent);
+}
+
+export function dumpsHtml(node: XmlNode, indent?: number): string {
+  return native.dumpsHtml(node, indent);
+}
+
+export function queryXml(node: XmlNode, selector: string): XmlNode[] {
+  return native.queryXml(node, selector);
+}
+
+export function xmlTextContent(node: XmlNode): string {
+  return native.xmlTextContent(node);
+}
+
+export function xmlGetAttribute(node: XmlNode, attrName: string): string | null {
+  return native.xmlGetAttribute(node, attrName);
+}
+
+export function validateXml(node: XmlNode, schema: XmlSchema): XmlValidationResult {
+  return native.validateXml(node, JSON.stringify(schema));
+}
+
+export function parseAndValidateXml(xmlString: string, schema: XmlSchema): XmlParseAndValidateResult {
+  return native.parseAndValidateXml(xmlString, JSON.stringify(schema));
+}
+
+export function parseAndValidateXmlEx(xmlString: string, schema: XmlSchema, repair?: XmlRepairConfig): XmlParseAndValidateResultEx {
+  return native.parseAndValidateXmlEx(xmlString, JSON.stringify(schema), repair);
 }
 
 export function parseAndValidateSql(sqlText: string, schema: SqlValidationSchema): SqlParsed {
@@ -560,4 +937,43 @@ export class JsonStreamValidatedBatchCollector {
         : null,
     };
   }
+}
+
+// ---- Schema Inference ----
+
+/**
+ * Infer JSON Schema from a single value.
+ * @param value - A JSON-compatible value
+ * @param config - Optional configuration for inference behavior
+ * @returns A JSON Schema object
+ */
+export function inferSchema(value: JsonValue, config?: SchemaInferenceConfig): JsonObject {
+  return native.inferSchema(value, config);
+}
+
+/**
+ * Infer JSON Schema from multiple values (merges schemas).
+ * This is useful for inferring a schema from multiple example values,
+ * where the schema should accept all of them.
+ * @param values - Array of JSON-compatible values
+ * @param config - Optional configuration for inference behavior
+ * @returns A merged JSON Schema object that accepts all input values
+ */
+export function inferSchemaFromValues(values: JsonValue[], config?: SchemaInferenceConfig): JsonObject {
+  return native.inferSchemaFromValues(values, config);
+}
+
+/**
+ * Merge two JSON Schemas into one that accepts values valid for either.
+ * @param schema1 - First JSON Schema
+ * @param schema2 - Second JSON Schema
+ * @param config - Optional configuration for merge behavior
+ * @returns A merged JSON Schema
+ */
+export function mergeSchemas(
+  schema1: JsonObject,
+  schema2: JsonObject,
+  config?: SchemaInferenceConfig
+): JsonObject {
+  return native.mergeSchemas(schema1, schema2, config);
 }

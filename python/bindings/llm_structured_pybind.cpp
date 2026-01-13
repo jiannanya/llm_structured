@@ -552,6 +552,647 @@ PYBIND11_MODULE(_native, m) {
     return MarkdownToDict(p);
   });
 
+  // ---- YAML APIs ----
+
+  m.def("extract_yaml_candidate", &llm_structured::extract_yaml_candidate);
+  m.def("extract_yaml_candidates", &llm_structured::extract_yaml_candidates);
+
+  m.def("loads_yamlish", [](const std::string& text) {
+    return ToPy(llm_structured::loads_yamlish(text));
+  });
+
+  m.def("loads_yamlish_all", [](const std::string& text) {
+    return ToPy(Json(llm_structured::loads_yamlish_all(text)));
+  });
+
+  m.def("loads_yamlish_ex", [](const std::string& text, py::object repair) {
+    llm_structured::YamlRepairConfig cfg;
+    if (!repair.is_none()) {
+      py::dict d = repair.cast<py::dict>();
+      auto set_bool = [&](const char* key, bool& field) {
+        if (d.contains(key)) field = d[key].cast<bool>();
+      };
+      set_bool("fixTabs", cfg.fix_tabs);
+      set_bool("normalizeIndentation", cfg.normalize_indentation);
+      set_bool("fixUnquotedValues", cfg.fix_unquoted_values);
+      set_bool("allowInlineJson", cfg.allow_inline_json);
+      set_bool("quoteAmbiguousStrings", cfg.quote_ambiguous_strings);
+    }
+    auto r = llm_structured::loads_yamlish_ex(text, cfg);
+    py::dict out;
+    out["value"] = ToPy(r.value);
+    out["fixed"] = r.fixed;
+    py::dict meta;
+    meta["extractedFromFence"] = r.metadata.extracted_from_fence;
+    meta["fixedTabs"] = r.metadata.fixed_tabs;
+    meta["normalizedIndentation"] = r.metadata.normalized_indentation;
+    meta["fixedUnquotedValues"] = r.metadata.fixed_unquoted_values;
+    meta["convertedInlineJson"] = r.metadata.converted_inline_json;
+    meta["quotedAmbiguousStrings"] = r.metadata.quoted_ambiguous_strings;
+    out["metadata"] = std::move(meta);
+    return out;
+  }, py::arg("text"), py::arg("repair") = py::none());
+
+  m.def("loads_yamlish_all_ex", [](const std::string& text, py::object repair) {
+    llm_structured::YamlRepairConfig cfg;
+    if (!repair.is_none()) {
+      py::dict d = repair.cast<py::dict>();
+      auto set_bool = [&](const char* key, bool& field) {
+        if (d.contains(key)) field = d[key].cast<bool>();
+      };
+      set_bool("fixTabs", cfg.fix_tabs);
+      set_bool("normalizeIndentation", cfg.normalize_indentation);
+      set_bool("fixUnquotedValues", cfg.fix_unquoted_values);
+      set_bool("allowInlineJson", cfg.allow_inline_json);
+      set_bool("quoteAmbiguousStrings", cfg.quote_ambiguous_strings);
+    }
+    auto r = llm_structured::loads_yamlish_all_ex(text, cfg);
+    py::dict out;
+    py::list values;
+    py::list fixed;
+    py::list meta_list;
+    for (size_t i = 0; i < r.values.size(); ++i) {
+      values.append(ToPy(r.values[i]));
+      fixed.append(py::str(r.fixed[i]));
+      py::dict meta;
+      meta["extractedFromFence"] = r.metadata[i].extracted_from_fence;
+      meta["fixedTabs"] = r.metadata[i].fixed_tabs;
+      meta["normalizedIndentation"] = r.metadata[i].normalized_indentation;
+      meta["fixedUnquotedValues"] = r.metadata[i].fixed_unquoted_values;
+      meta["convertedInlineJson"] = r.metadata[i].converted_inline_json;
+      meta["quotedAmbiguousStrings"] = r.metadata[i].quoted_ambiguous_strings;
+      meta_list.append(std::move(meta));
+    }
+    out["values"] = std::move(values);
+    out["fixed"] = std::move(fixed);
+    out["metadata"] = std::move(meta_list);
+    return out;
+  }, py::arg("text"), py::arg("repair") = py::none());
+
+  m.def("dumps_yaml", [](py::handle v, int indent) {
+    Json j;
+    if (!FromPy(v, j)) throw std::runtime_error("value must be JSON-serializable");
+    return llm_structured::dumps_yaml(j, indent);
+  }, py::arg("value"), py::arg("indent") = 2);
+
+  m.def("parse_and_validate_yaml", [](const std::string& text, py::handle schema) {
+    Json s = SchemaFromPy(schema);
+    return ToPy(llm_structured::parse_and_validate_yaml(text, s));
+  });
+
+  m.def("parse_and_validate_yaml_all", [](const std::string& text, py::handle schema) {
+    Json s = SchemaFromPy(schema);
+    return ToPy(Json(llm_structured::parse_and_validate_yaml_all(text, s)));
+  });
+
+  m.def("parse_and_validate_yaml_ex", [](const std::string& text, py::handle schema, py::object repair) {
+    Json s = SchemaFromPy(schema);
+    llm_structured::YamlRepairConfig cfg;
+    if (!repair.is_none()) {
+      py::dict d = repair.cast<py::dict>();
+      auto set_bool = [&](const char* key, bool& field) {
+        if (d.contains(key)) field = d[key].cast<bool>();
+      };
+      set_bool("fixTabs", cfg.fix_tabs);
+      set_bool("normalizeIndentation", cfg.normalize_indentation);
+      set_bool("fixUnquotedValues", cfg.fix_unquoted_values);
+      set_bool("allowInlineJson", cfg.allow_inline_json);
+      set_bool("quoteAmbiguousStrings", cfg.quote_ambiguous_strings);
+    }
+    auto r = llm_structured::parse_and_validate_yaml_ex(text, s, cfg);
+    py::dict out;
+    out["value"] = ToPy(r.value);
+    out["fixed"] = r.fixed;
+    py::dict meta;
+    meta["extractedFromFence"] = r.metadata.extracted_from_fence;
+    meta["fixedTabs"] = r.metadata.fixed_tabs;
+    meta["normalizedIndentation"] = r.metadata.normalized_indentation;
+    meta["fixedUnquotedValues"] = r.metadata.fixed_unquoted_values;
+    meta["convertedInlineJson"] = r.metadata.converted_inline_json;
+    meta["quotedAmbiguousStrings"] = r.metadata.quoted_ambiguous_strings;
+    out["metadata"] = std::move(meta);
+    return out;
+  }, py::arg("text"), py::arg("schema"), py::arg("repair") = py::none());
+
+  m.def("parse_and_validate_yaml_all_ex", [](const std::string& text, py::handle schema, py::object repair) {
+    Json s = SchemaFromPy(schema);
+    llm_structured::YamlRepairConfig cfg;
+    if (!repair.is_none()) {
+      py::dict d = repair.cast<py::dict>();
+      auto set_bool = [&](const char* key, bool& field) {
+        if (d.contains(key)) field = d[key].cast<bool>();
+      };
+      set_bool("fixTabs", cfg.fix_tabs);
+      set_bool("normalizeIndentation", cfg.normalize_indentation);
+      set_bool("fixUnquotedValues", cfg.fix_unquoted_values);
+      set_bool("allowInlineJson", cfg.allow_inline_json);
+      set_bool("quoteAmbiguousStrings", cfg.quote_ambiguous_strings);
+    }
+    auto r = llm_structured::parse_and_validate_yaml_all_ex(text, s, cfg);
+    py::dict out;
+    py::list values;
+    py::list fixed;
+    py::list meta_list;
+    for (size_t i = 0; i < r.values.size(); ++i) {
+      values.append(ToPy(r.values[i]));
+      fixed.append(py::str(r.fixed[i]));
+      py::dict meta;
+      meta["extractedFromFence"] = r.metadata[i].extracted_from_fence;
+      meta["fixedTabs"] = r.metadata[i].fixed_tabs;
+      meta["normalizedIndentation"] = r.metadata[i].normalized_indentation;
+      meta["fixedUnquotedValues"] = r.metadata[i].fixed_unquoted_values;
+      meta["convertedInlineJson"] = r.metadata[i].converted_inline_json;
+      meta["quotedAmbiguousStrings"] = r.metadata[i].quoted_ambiguous_strings;
+      meta_list.append(std::move(meta));
+    }
+    out["values"] = std::move(values);
+    out["fixed"] = std::move(fixed);
+    out["metadata"] = std::move(meta_list);
+    return out;
+  }, py::arg("text"), py::arg("schema"), py::arg("repair") = py::none());
+
+  // ---- TOML-ish ----
+
+  m.def("extract_toml_candidate", &llm_structured::extract_toml_candidate);
+  m.def("extract_toml_candidates", &llm_structured::extract_toml_candidates);
+
+  m.def("loads_tomlish", [](const std::string& text) {
+    return ToPy(llm_structured::loads_tomlish(text));
+  });
+
+  m.def("loads_tomlish_all", [](const std::string& text) {
+    return ToPy(Json(llm_structured::loads_tomlish_all(text)));
+  });
+
+  m.def("loads_tomlish_ex", [](const std::string& text, py::object repair) {
+    llm_structured::TomlRepairConfig cfg;
+    if (!repair.is_none()) {
+      py::dict d = repair.cast<py::dict>();
+      auto set_bool = [&](const char* key, bool& field) {
+        if (d.contains(key)) field = d[key].cast<bool>();
+      };
+      set_bool("fixUnquotedStrings", cfg.fix_unquoted_strings);
+      set_bool("allowSingleQuotes", cfg.allow_single_quotes);
+      set_bool("normalizeWhitespace", cfg.normalize_whitespace);
+      set_bool("fixTableNames", cfg.fix_table_names);
+      set_bool("allowMultilineInlineTables", cfg.allow_multiline_inline_tables);
+    }
+    auto r = llm_structured::loads_tomlish_ex(text, cfg);
+    py::dict out;
+    out["value"] = ToPy(r.value);
+    out["fixed"] = r.fixed;
+    py::dict meta;
+    meta["extractedFromFence"] = r.metadata.extracted_from_fence;
+    meta["fixedUnquotedStrings"] = r.metadata.fixed_unquoted_strings;
+    meta["convertedSingleQuotes"] = r.metadata.converted_single_quotes;
+    meta["normalizedWhitespace"] = r.metadata.normalized_whitespace;
+    meta["fixedTableNames"] = r.metadata.fixed_table_names;
+    meta["convertedMultilineInline"] = r.metadata.converted_multiline_inline;
+    out["metadata"] = std::move(meta);
+    return out;
+  }, py::arg("text"), py::arg("repair") = py::none());
+
+  m.def("loads_tomlish_all_ex", [](const std::string& text, py::object repair) {
+    llm_structured::TomlRepairConfig cfg;
+    if (!repair.is_none()) {
+      py::dict d = repair.cast<py::dict>();
+      auto set_bool = [&](const char* key, bool& field) {
+        if (d.contains(key)) field = d[key].cast<bool>();
+      };
+      set_bool("fixUnquotedStrings", cfg.fix_unquoted_strings);
+      set_bool("allowSingleQuotes", cfg.allow_single_quotes);
+      set_bool("normalizeWhitespace", cfg.normalize_whitespace);
+      set_bool("fixTableNames", cfg.fix_table_names);
+      set_bool("allowMultilineInlineTables", cfg.allow_multiline_inline_tables);
+    }
+    auto r = llm_structured::loads_tomlish_all_ex(text, cfg);
+    py::dict out;
+    py::list values;
+    py::list fixed;
+    py::list meta_list;
+    for (size_t i = 0; i < r.values.size(); ++i) {
+      values.append(ToPy(r.values[i]));
+      fixed.append(py::str(r.fixed[i]));
+      py::dict meta;
+      meta["extractedFromFence"] = r.metadata[i].extracted_from_fence;
+      meta["fixedUnquotedStrings"] = r.metadata[i].fixed_unquoted_strings;
+      meta["convertedSingleQuotes"] = r.metadata[i].converted_single_quotes;
+      meta["normalizedWhitespace"] = r.metadata[i].normalized_whitespace;
+      meta["fixedTableNames"] = r.metadata[i].fixed_table_names;
+      meta["convertedMultilineInline"] = r.metadata[i].converted_multiline_inline;
+      meta_list.append(std::move(meta));
+    }
+    out["values"] = std::move(values);
+    out["fixed"] = std::move(fixed);
+    out["metadata"] = std::move(meta_list);
+    return out;
+  }, py::arg("text"), py::arg("repair") = py::none());
+
+  m.def("dumps_toml", [](py::handle v) {
+    Json j;
+    if (!FromPy(v, j)) throw std::runtime_error("value must be JSON-serializable");
+    return llm_structured::dumps_toml(j);
+  }, py::arg("value"));
+
+  m.def("parse_and_validate_toml", [](const std::string& text, py::handle schema) {
+    Json s = SchemaFromPy(schema);
+    return ToPy(llm_structured::parse_and_validate_toml(text, s));
+  });
+
+  m.def("parse_and_validate_toml_all", [](const std::string& text, py::handle schema) {
+    Json s = SchemaFromPy(schema);
+    return ToPy(Json(llm_structured::parse_and_validate_toml_all(text, s)));
+  });
+
+  m.def("parse_and_validate_toml_ex", [](const std::string& text, py::handle schema, py::object repair) {
+    Json s = SchemaFromPy(schema);
+    llm_structured::TomlRepairConfig cfg;
+    if (!repair.is_none()) {
+      py::dict d = repair.cast<py::dict>();
+      auto set_bool = [&](const char* key, bool& field) {
+        if (d.contains(key)) field = d[key].cast<bool>();
+      };
+      set_bool("fixUnquotedStrings", cfg.fix_unquoted_strings);
+      set_bool("allowSingleQuotes", cfg.allow_single_quotes);
+      set_bool("normalizeWhitespace", cfg.normalize_whitespace);
+      set_bool("fixTableNames", cfg.fix_table_names);
+      set_bool("allowMultilineInlineTables", cfg.allow_multiline_inline_tables);
+    }
+    auto r = llm_structured::parse_and_validate_toml_ex(text, s, cfg);
+    py::dict out;
+    out["value"] = ToPy(r.value);
+    out["fixed"] = r.fixed;
+    py::dict meta;
+    meta["extractedFromFence"] = r.metadata.extracted_from_fence;
+    meta["fixedUnquotedStrings"] = r.metadata.fixed_unquoted_strings;
+    meta["convertedSingleQuotes"] = r.metadata.converted_single_quotes;
+    meta["normalizedWhitespace"] = r.metadata.normalized_whitespace;
+    meta["fixedTableNames"] = r.metadata.fixed_table_names;
+    meta["convertedMultilineInline"] = r.metadata.converted_multiline_inline;
+    out["metadata"] = std::move(meta);
+    return out;
+  }, py::arg("text"), py::arg("schema"), py::arg("repair") = py::none());
+
+  m.def("parse_and_validate_toml_all_ex", [](const std::string& text, py::handle schema, py::object repair) {
+    Json s = SchemaFromPy(schema);
+    llm_structured::TomlRepairConfig cfg;
+    if (!repair.is_none()) {
+      py::dict d = repair.cast<py::dict>();
+      auto set_bool = [&](const char* key, bool& field) {
+        if (d.contains(key)) field = d[key].cast<bool>();
+      };
+      set_bool("fixUnquotedStrings", cfg.fix_unquoted_strings);
+      set_bool("allowSingleQuotes", cfg.allow_single_quotes);
+      set_bool("normalizeWhitespace", cfg.normalize_whitespace);
+      set_bool("fixTableNames", cfg.fix_table_names);
+      set_bool("allowMultilineInlineTables", cfg.allow_multiline_inline_tables);
+    }
+    auto r = llm_structured::parse_and_validate_toml_all_ex(text, s, cfg);
+    py::dict out;
+    py::list values;
+    py::list fixed;
+    py::list meta_list;
+    for (size_t i = 0; i < r.values.size(); ++i) {
+      values.append(ToPy(r.values[i]));
+      fixed.append(py::str(r.fixed[i]));
+      py::dict meta;
+      meta["extractedFromFence"] = r.metadata[i].extracted_from_fence;
+      meta["fixedUnquotedStrings"] = r.metadata[i].fixed_unquoted_strings;
+      meta["convertedSingleQuotes"] = r.metadata[i].converted_single_quotes;
+      meta["normalizedWhitespace"] = r.metadata[i].normalized_whitespace;
+      meta["fixedTableNames"] = r.metadata[i].fixed_table_names;
+      meta["convertedMultilineInline"] = r.metadata[i].converted_multiline_inline;
+      meta_list.append(std::move(meta));
+    }
+    out["values"] = std::move(values);
+    out["fixed"] = std::move(fixed);
+    out["metadata"] = std::move(meta_list);
+    return out;
+  }, py::arg("text"), py::arg("schema"), py::arg("repair") = py::none());
+
+  // ---- XML / HTML functions ----
+
+  // Helper to convert XmlNode to Python dict
+  auto XmlNodeToPy = [](const llm_structured::XmlNode& node, auto& self_ref) -> py::dict {
+    py::dict d;
+    std::string type_str;
+    switch (node.type) {
+      case llm_structured::XmlNode::Type::Element: type_str = "element"; break;
+      case llm_structured::XmlNode::Type::Text: type_str = "text"; break;
+      case llm_structured::XmlNode::Type::Comment: type_str = "comment"; break;
+      case llm_structured::XmlNode::Type::CData: type_str = "cdata"; break;
+      case llm_structured::XmlNode::Type::ProcessingInstruction: type_str = "processing_instruction"; break;
+      case llm_structured::XmlNode::Type::Doctype: type_str = "doctype"; break;
+    }
+    d["type"] = type_str;
+    d["name"] = node.name;
+    d["text"] = node.text;
+    py::dict attrs;
+    for (const auto& kv : node.attributes) {
+      attrs[py::str(kv.first)] = kv.second;
+    }
+    d["attributes"] = attrs;
+    py::list children_list;
+    for (const auto& child : node.children) {
+      children_list.append(self_ref(child, self_ref));
+    }
+    d["children"] = children_list;
+    return d;
+  };
+
+  // Helper to convert Python dict to XmlRepairConfig
+  auto XmlRepairConfigFromPy = [](py::object obj) -> llm_structured::XmlRepairConfig {
+    llm_structured::XmlRepairConfig cfg;
+    if (!obj.is_none()) {
+      py::dict d = obj.cast<py::dict>();
+      if (d.contains("html_mode")) cfg.html_mode = d["html_mode"].cast<bool>();
+      if (d.contains("fix_unquoted_attributes")) cfg.fix_unquoted_attributes = d["fix_unquoted_attributes"].cast<bool>();
+      if (d.contains("auto_close_tags")) cfg.auto_close_tags = d["auto_close_tags"].cast<bool>();
+      if (d.contains("normalize_whitespace")) cfg.normalize_whitespace = d["normalize_whitespace"].cast<bool>();
+      if (d.contains("lowercase_names")) cfg.lowercase_names = d["lowercase_names"].cast<bool>();
+      if (d.contains("decode_entities")) cfg.decode_entities = d["decode_entities"].cast<bool>();
+    }
+    return cfg;
+  };
+
+  // Helper to convert XmlRepairMetadata to Python dict
+  auto XmlRepairMetadataToPy = [](const llm_structured::XmlRepairMetadata& meta) -> py::dict {
+    py::dict d;
+    d["extracted_from_fence"] = meta.extracted_from_fence;
+    d["fixed_unquoted_attributes"] = meta.fixed_unquoted_attributes;
+    d["auto_closed_tags"] = meta.auto_closed_tags;
+    d["normalized_whitespace"] = meta.normalized_whitespace;
+    d["lowercased_names"] = meta.lowercased_names;
+    d["decoded_entities"] = meta.decoded_entities;
+    d["unclosed_tag_count"] = meta.unclosed_tag_count;
+    return d;
+  };
+
+  // Helper to convert Python dict to XmlNode (with self-reference for recursion)
+  auto PyToXmlNode = [](py::dict d, auto& self_ref) -> llm_structured::XmlNode {
+    llm_structured::XmlNode node;
+    std::string type_str = d["type"].cast<std::string>();
+    if (type_str == "element") node.type = llm_structured::XmlNode::Type::Element;
+    else if (type_str == "text") node.type = llm_structured::XmlNode::Type::Text;
+    else if (type_str == "comment") node.type = llm_structured::XmlNode::Type::Comment;
+    else if (type_str == "cdata") node.type = llm_structured::XmlNode::Type::CData;
+    else if (type_str == "processing_instruction") node.type = llm_structured::XmlNode::Type::ProcessingInstruction;
+    else if (type_str == "doctype") node.type = llm_structured::XmlNode::Type::Doctype;
+    
+    if (d.contains("name")) node.name = d["name"].cast<std::string>();
+    if (d.contains("text")) node.text = d["text"].cast<std::string>();
+    if (d.contains("attributes")) {
+      py::dict attrs = d["attributes"].cast<py::dict>();
+      for (auto item : attrs) {
+        node.attributes[item.first.cast<std::string>()] = item.second.cast<std::string>();
+      }
+    }
+    if (d.contains("children")) {
+      py::list children = d["children"].cast<py::list>();
+      for (auto child : children) {
+        node.children.push_back(self_ref(child.cast<py::dict>(), self_ref));
+      }
+    }
+    return node;
+  };
+
+  m.def("extract_xml_candidate", [](const std::string& text) {
+    return llm_structured::extract_xml_candidate(text);
+  }, py::arg("text"));
+
+  m.def("extract_xml_candidates", [](const std::string& text) {
+    return llm_structured::extract_xml_candidates(text);
+  }, py::arg("text"));
+
+  m.def("loads_xml", [XmlNodeToPy](const std::string& xml_string) {
+    try {
+      auto result = llm_structured::loads_xml(xml_string);
+      py::dict out;
+      out["ok"] = true;
+      out["error"] = "";
+      out["root"] = XmlNodeToPy(result, XmlNodeToPy);
+      return out;
+    } catch (const std::exception& e) {
+      py::dict out;
+      out["ok"] = false;
+      out["error"] = e.what();
+      out["root"] = py::none();
+      return out;
+    }
+  }, py::arg("xml_string"));
+
+  m.def("loads_xml_ex", [XmlNodeToPy, XmlRepairConfigFromPy, XmlRepairMetadataToPy](const std::string& xml_string, py::object repair) {
+    try {
+      auto cfg = XmlRepairConfigFromPy(repair);
+      auto result = llm_structured::loads_xml_ex(xml_string, cfg);
+      py::dict out;
+      out["ok"] = true;
+      out["error"] = "";
+      out["root"] = XmlNodeToPy(result.root, XmlNodeToPy);
+      out["fixed"] = result.fixed;
+      out["metadata"] = XmlRepairMetadataToPy(result.metadata);
+      return out;
+    } catch (const std::exception& e) {
+      py::dict out;
+      out["ok"] = false;
+      out["error"] = e.what();
+      out["root"] = py::none();
+      out["fixed"] = "";
+      out["metadata"] = py::dict();
+      return out;
+    }
+  }, py::arg("xml_string"), py::arg("repair") = py::none());
+
+  m.def("loads_html", [XmlNodeToPy](const std::string& html_string) {
+    try {
+      auto result = llm_structured::loads_html(html_string);
+      py::dict out;
+      out["ok"] = true;
+      out["error"] = "";
+      out["root"] = XmlNodeToPy(result, XmlNodeToPy);
+      return out;
+    } catch (const std::exception& e) {
+      py::dict out;
+      out["ok"] = false;
+      out["error"] = e.what();
+      out["root"] = py::none();
+      return out;
+    }
+  }, py::arg("html_string"));
+
+  m.def("loads_html_ex", [XmlNodeToPy, XmlRepairConfigFromPy, XmlRepairMetadataToPy](const std::string& html_string, py::object repair) {
+    try {
+      auto cfg = XmlRepairConfigFromPy(repair);
+      auto result = llm_structured::loads_html_ex(html_string, cfg);
+      py::dict out;
+      out["ok"] = true;
+      out["error"] = "";
+      out["root"] = XmlNodeToPy(result.root, XmlNodeToPy);
+      out["fixed"] = result.fixed;
+      out["metadata"] = XmlRepairMetadataToPy(result.metadata);
+      return out;
+    } catch (const std::exception& e) {
+      py::dict out;
+      out["ok"] = false;
+      out["error"] = e.what();
+      out["root"] = py::none();
+      out["fixed"] = "";
+      out["metadata"] = py::dict();
+      return out;
+    }
+  }, py::arg("html_string"), py::arg("repair") = py::none());
+
+  m.def("xml_to_json", [](const std::string& xml_string) -> py::object {
+    try {
+      auto node = llm_structured::loads_xml(xml_string);
+      Json j = llm_structured::xml_to_json(node);
+      return ToPy(j);
+    } catch (...) {
+      return py::none();
+    }
+  }, py::arg("xml_string"));
+
+  m.def("loads_xml_as_json", [](const std::string& xml_string) -> py::object {
+    auto result = llm_structured::loads_xml_as_json(xml_string);
+    if (result.is_null()) return py::none();
+    return ToPy(result);
+  }, py::arg("xml_string"));
+
+  m.def("loads_html_as_json", [](const std::string& html_string) -> py::object {
+    auto result = llm_structured::loads_html_as_json(html_string);
+    if (result.is_null()) return py::none();
+    return ToPy(result);
+  }, py::arg("html_string"));
+
+  m.def("dumps_xml", [PyToXmlNode](py::handle node, int indent) {
+    llm_structured::XmlNode xml_node = PyToXmlNode(node.cast<py::dict>(), PyToXmlNode);
+    return llm_structured::dumps_xml(xml_node, indent);
+  }, py::arg("node"), py::arg("indent") = 2);
+
+  m.def("dumps_html", [PyToXmlNode](py::handle node, int indent) {
+    llm_structured::XmlNode xml_node = PyToXmlNode(node.cast<py::dict>(), PyToXmlNode);
+    return llm_structured::dumps_html(xml_node, indent);
+  }, py::arg("node"), py::arg("indent") = 2);
+
+  m.def("query_xml", [XmlNodeToPy, PyToXmlNode](py::handle node, const std::string& selector) {
+    llm_structured::XmlNode xml_node = PyToXmlNode(node.cast<py::dict>(), PyToXmlNode);
+    auto results = llm_structured::query_xml(xml_node, selector);
+    py::list out;
+    for (const auto* r : results) {
+      out.append(XmlNodeToPy(*r, XmlNodeToPy));
+    }
+    return out;
+  }, py::arg("node"), py::arg("selector"));
+
+  m.def("xml_text_content", [PyToXmlNode](py::handle node) {
+    llm_structured::XmlNode xml_node = PyToXmlNode(node.cast<py::dict>(), PyToXmlNode);
+    return llm_structured::xml_text_content(xml_node);
+  }, py::arg("node"));
+
+  m.def("xml_get_attribute", [PyToXmlNode](py::handle node, const std::string& attr_name) -> py::object {
+    llm_structured::XmlNode xml_node = PyToXmlNode(node.cast<py::dict>(), PyToXmlNode);
+    std::string result = llm_structured::xml_get_attribute(xml_node, attr_name);
+    if (!result.empty()) return py::cast(result);
+    // Check if attribute exists but is empty
+    auto it = xml_node.attributes.find(attr_name);
+    if (it != xml_node.attributes.end()) return py::cast(result);
+    return py::none();
+  }, py::arg("node"), py::arg("attr_name"));
+
+  m.def("validate_xml", [PyToXmlNode](py::handle node, py::handle schema) {
+    llm_structured::XmlNode xml_node = PyToXmlNode(node.cast<py::dict>(), PyToXmlNode);
+    Json s = SchemaFromPy(schema);
+    py::dict out;
+    py::list errors;
+    try {
+      llm_structured::validate_xml(xml_node, s, "$");
+      out["ok"] = true;
+    } catch (const ValidationError& e) {
+      out["ok"] = false;
+      py::dict err;
+      err["path"] = e.path;
+      err["message"] = e.what();
+      errors.append(std::move(err));
+    } catch (const std::exception& e) {
+      out["ok"] = false;
+      py::dict err;
+      err["path"] = "$";
+      err["message"] = e.what();
+      errors.append(std::move(err));
+    }
+    out["errors"] = errors;
+    return out;
+  }, py::arg("node"), py::arg("schema"));
+
+  m.def("parse_and_validate_xml", [XmlNodeToPy](const std::string& xml_string, py::handle schema) {
+    Json s = SchemaFromPy(schema);
+    py::dict out;
+    py::list errors;
+    try {
+      auto result = llm_structured::parse_and_validate_xml(xml_string, s);
+      out["ok"] = true;
+      out["error"] = "";
+      out["root"] = XmlNodeToPy(result, XmlNodeToPy);
+    } catch (const ValidationError& e) {
+      out["ok"] = false;
+      out["error"] = "";
+      // Parse succeeded, validation failed
+      try {
+        auto node = llm_structured::loads_xml(xml_string);
+        out["root"] = XmlNodeToPy(node, XmlNodeToPy);
+      } catch (...) {
+        out["root"] = py::none();
+      }
+      py::dict err;
+      err["path"] = e.path;
+      err["message"] = e.what();
+      errors.append(std::move(err));
+    } catch (const std::exception& e) {
+      out["ok"] = false;
+      out["error"] = e.what();
+      out["root"] = py::none();
+    }
+    out["validation_errors"] = errors;
+    return out;
+  }, py::arg("xml_string"), py::arg("schema"));
+
+  m.def("parse_and_validate_xml_ex", [XmlNodeToPy, XmlRepairConfigFromPy, XmlRepairMetadataToPy](const std::string& xml_string, py::handle schema, py::object repair) {
+    Json s = SchemaFromPy(schema);
+    auto cfg = XmlRepairConfigFromPy(repair);
+    py::dict out;
+    py::list errors;
+    try {
+      auto result = llm_structured::parse_and_validate_xml_ex(xml_string, s, cfg);
+      out["ok"] = true;
+      out["error"] = "";
+      out["root"] = XmlNodeToPy(result.root, XmlNodeToPy);
+      out["metadata"] = XmlRepairMetadataToPy(result.metadata);
+    } catch (const ValidationError& e) {
+      out["ok"] = false;
+      out["error"] = "";
+      // Parse succeeded, validation failed
+      try {
+        auto parse_result = llm_structured::loads_xml_ex(xml_string, cfg);
+        out["root"] = XmlNodeToPy(parse_result.root, XmlNodeToPy);
+        out["metadata"] = XmlRepairMetadataToPy(parse_result.metadata);
+      } catch (...) {
+        out["root"] = py::none();
+        out["metadata"] = py::dict();
+      }
+      py::dict err;
+      err["path"] = e.path;
+      err["message"] = e.what();
+      errors.append(std::move(err));
+    } catch (const std::exception& e) {
+      out["ok"] = false;
+      out["error"] = e.what();
+      out["root"] = py::none();
+      out["metadata"] = py::dict();
+    }
+    out["validation_errors"] = errors;
+    return out;
+  }, py::arg("xml_string"), py::arg("schema"), py::arg("repair") = py::none());
+
   // ---- Streaming classes ----
 
   py::class_<llm_structured::JsonStreamParser>(m, "JsonStreamParser")
@@ -645,4 +1286,62 @@ PYBIND11_MODULE(_native, m) {
       .def("append", &llm_structured::SqlStreamParser::append)
       .def("poll", [](llm_structured::SqlStreamParser& self) { return OutcomeToDict(self.poll()); })
       .def("location", [](llm_structured::SqlStreamParser& self) { return StreamLocationToPy(self.location()); });
+
+  // ---- Schema Inference ----
+
+  // Helper to convert Python dict to SchemaInferenceConfig
+  auto SchemaInferenceConfigFromPy = [](py::object obj) -> llm_structured::SchemaInferenceConfig {
+    llm_structured::SchemaInferenceConfig cfg;
+    if (!obj.is_none()) {
+      py::dict d = obj.cast<py::dict>();
+      if (d.contains("include_examples")) cfg.include_examples = d["include_examples"].cast<bool>();
+      if (d.contains("max_examples")) cfg.max_examples = d["max_examples"].cast<int>();
+      if (d.contains("include_default")) cfg.include_default = d["include_default"].cast<bool>();
+      if (d.contains("infer_formats")) cfg.infer_formats = d["infer_formats"].cast<bool>();
+      if (d.contains("infer_patterns")) cfg.infer_patterns = d["infer_patterns"].cast<bool>();
+      if (d.contains("infer_numeric_ranges")) cfg.infer_numeric_ranges = d["infer_numeric_ranges"].cast<bool>();
+      if (d.contains("infer_string_lengths")) cfg.infer_string_lengths = d["infer_string_lengths"].cast<bool>();
+      if (d.contains("infer_array_lengths")) cfg.infer_array_lengths = d["infer_array_lengths"].cast<bool>();
+      if (d.contains("required_by_default")) cfg.required_by_default = d["required_by_default"].cast<bool>();
+      if (d.contains("strict_additional_properties")) cfg.strict_additional_properties = d["strict_additional_properties"].cast<bool>();
+      if (d.contains("prefer_integer")) cfg.prefer_integer = d["prefer_integer"].cast<bool>();
+      if (d.contains("allow_any_of")) cfg.allow_any_of = d["allow_any_of"].cast<bool>();
+      if (d.contains("include_descriptions")) cfg.include_descriptions = d["include_descriptions"].cast<bool>();
+      if (d.contains("detect_enums")) cfg.detect_enums = d["detect_enums"].cast<bool>();
+      if (d.contains("max_enum_values")) cfg.max_enum_values = d["max_enum_values"].cast<int>();
+    }
+    return cfg;
+  };
+
+  m.def("infer_schema", [SchemaInferenceConfigFromPy](py::handle value, py::object config) {
+    Json v;
+    if (!FromPy(value, v)) {
+      throw std::runtime_error("value must be a JSON-serializable dict/list/primitive");
+    }
+    auto cfg = SchemaInferenceConfigFromPy(config);
+    Json schema = llm_structured::infer_schema(v, cfg);
+    return ToPy(schema);
+  }, py::arg("value"), py::arg("config") = py::none());
+
+  m.def("infer_schema_from_values", [SchemaInferenceConfigFromPy](py::handle values, py::object config) {
+    JsonArray arr;
+    for (auto item : values.cast<py::list>()) {
+      Json v;
+      if (!FromPy(item, v)) {
+        throw std::runtime_error("all values must be JSON-serializable");
+      }
+      arr.push_back(v);
+    }
+    auto cfg = SchemaInferenceConfigFromPy(config);
+    Json schema = llm_structured::infer_schema_from_values(arr, cfg);
+    return ToPy(schema);
+  }, py::arg("values"), py::arg("config") = py::none());
+
+  m.def("merge_schemas", [SchemaInferenceConfigFromPy](py::handle schema1, py::handle schema2, py::object config) {
+    Json s1 = SchemaFromPy(schema1);
+    Json s2 = SchemaFromPy(schema2);
+    auto cfg = SchemaInferenceConfigFromPy(config);
+    Json merged = llm_structured::merge_schemas(s1, s2, cfg);
+    return ToPy(merged);
+  }, py::arg("schema1"), py::arg("schema2"), py::arg("config") = py::none());
 }
