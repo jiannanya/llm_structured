@@ -12,9 +12,21 @@ import {
   parseAndValidateJsonWithDefaultsEx,
   validateAllJson,
   validateAllJsonValue,
+  validateWithRepair,
+  parseAndRepair,
   parseAndValidateKv,
   parseAndValidateMarkdown,
   parseAndValidateSql,
+  extractXmlCandidate,
+  loadsXmlEx,
+  loadsHtmlEx,
+  loadsXmlAsJson,
+  dumpsXml,
+  dumpsHtml,
+  queryXml,
+  xmlGetAttribute,
+  xmlTextContent,
+  validateXml,
   JsonStreamParser,
   JsonStreamCollector,
   JsonStreamBatchCollector,
@@ -24,6 +36,7 @@ import {
   type KeyValueSchema,
   type MarkdownValidationSchema,
   type SqlValidationSchema,
+  type XmlSchema,
 } from "../src/index";
 
 function testJsonSchemaKeywords(): void {
@@ -198,6 +211,112 @@ function testValidateAllJsonValuePointers(): void {
   assert.ok(errs.some((e) => e.path.includes("$.items[0].id")));
 }
 
+function testValidateWithRepairApis(): void {
+  const schema: JsonSchema = {
+    type: "object",
+    required: ["age", "name"],
+    additionalProperties: false,
+    properties: {
+      age: { type: "integer", minimum: 0, maximum: 120 },
+      name: { type: "string", minLength: 1 },
+    },
+  };
+
+  const r = validateWithRepair({ age: "200", name: "  Alice  ", extra: 1 } as any, schema, {
+    coerceTypes: true,
+    clampNumbers: true,
+    removeExtraProperties: true,
+    maxSuggestions: 20,
+  });
+
+  assert.equal(r.valid, false);
+  assert.equal(r.fullyRepaired, true);
+  assert.deepEqual(r.repairedValue, { age: 120, name: "  Alice  " });
+  assert.ok(r.suggestions.length >= 1);
+  assert.equal(r.unfixableErrors.length, 0);
+
+  const r2 = parseAndRepair('{"age":"200","name":"Bob","extra":1}', schema, {
+    coerceTypes: true,
+    clampNumbers: true,
+    removeExtraProperties: true,
+  });
+  assert.equal(r2.fullyRepaired, true);
+  assert.deepEqual(r2.repairedValue, { age: 120, name: "Bob" });
+}
+
+function testXmlHtmlApis(): void {
+  const llmText = `
+下面是 XML：
+
+\`\`\`xml
+<items>
+  <item id=a1> Hello </item>
+  <item id=b2>World</item>
+</items>
+\`\`\`
+`;
+
+  const xml = extractXmlCandidate(llmText);
+  assert.ok(xml.includes("<items>"));
+  assert.ok(xml.includes("<item"));
+
+  const parsed = loadsXmlEx(xml, {
+    fix_unquoted_attributes: true,
+    auto_close_tags: true,
+    decode_entities: true,
+  });
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.error, "");
+  assert.ok(parsed.root);
+  assert.ok(parsed.metadata.fixed_attributes >= 1);
+
+  const items = queryXml(parsed.root!, "item");
+  assert.equal(items.length, 2);
+  assert.equal(xmlGetAttribute(items[0], "id"), "a1");
+  assert.equal(xmlGetAttribute(items[1], "id"), "b2");
+  assert.ok(xmlTextContent(items[0]).includes("Hello"));
+  assert.ok(xmlTextContent(items[1]).includes("World"));
+
+  const xmlOut = dumpsXml(parsed.root!, 2);
+  assert.ok(xmlOut.includes("<items>"));
+  assert.ok(xmlOut.includes('id="a1"'));
+
+  const asJson = loadsXmlAsJson(xml) as any;
+  assert.equal(asJson["#name"], "items");
+  assert.equal(asJson["#children"].length, 2);
+
+  const schema: XmlSchema = {
+    element: "items",
+    children: { minItems: 1, required: ["item"] },
+  };
+  const vOk = validateXml(parsed.root!, schema);
+  assert.equal(vOk.ok, true);
+  assert.equal(vOk.errors.length, 0);
+
+  const badItemSchema: XmlSchema = {
+    element: "item",
+    requiredAttributes: ["id", "missing"],
+  };
+  const vBad = validateXml(items[0], badItemSchema);
+  assert.equal(vBad.ok, false);
+  assert.equal(vBad.errors.length, 1);
+  assert.equal(vBad.errors[0].path, "$");
+  assert.ok(vBad.errors[0].message.includes("Missing required attribute"));
+
+  const html = `<div class=card><p>Hello<b>world</div>`;
+  const htmlParsed = loadsHtmlEx(html, {
+    html_mode: true,
+    fix_unquoted_attributes: true,
+    auto_close_tags: true,
+    lowercase_names: true,
+  });
+  assert.equal(htmlParsed.ok, true);
+  assert.ok(htmlParsed.root);
+  const htmlOut = dumpsHtml(htmlParsed.root!, 2);
+  assert.ok(htmlOut.includes("<div"));
+  assert.ok(htmlOut.includes("<b>world</b>"));
+}
+
 function testKvAndMarkdown(): void {
   const kvSchema: KeyValueSchema = {
     required: ["A"],
@@ -318,6 +437,8 @@ function main(): void {
   testRepairExAndMetadata();
   testMultiJsonBlocks();
   testValidateAllJsonValuePointers();
+  testValidateWithRepairApis();
+  testXmlHtmlApis();
   testKvAndMarkdown();
   testSqlStreamingAndLimits();
   testStreamingFinishAndLocation();

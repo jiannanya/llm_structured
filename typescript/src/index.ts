@@ -54,6 +54,29 @@ const native = require(path.join(__dirname, "..", "..", "build", "Release", "add
 
   validateAllJson(text: string, schemaJson: string): Array<NativeValidationError & { jsonPointer?: string }>;
   validateAllJsonValue(value: JsonValue, schemaJson: string): Array<NativeValidationError & { jsonPointer?: string }>;
+  validateWithRepair(
+    value: JsonValue,
+    schemaJson: string,
+    config?: ValidationRepairConfig
+  ): {
+    valid: boolean;
+    fullyRepaired: boolean;
+    repairedValue: JsonValue;
+    suggestions: RepairSuggestion[];
+    unfixableErrors: Array<NativeValidationError & { jsonPointer?: string }>;
+  };
+  parseAndRepair(
+    text: string,
+    schemaJson: string,
+    config?: ValidationRepairConfig,
+    parseRepair?: RepairConfig
+  ): {
+    valid: boolean;
+    fullyRepaired: boolean;
+    repairedValue: JsonValue;
+    suggestions: RepairSuggestion[];
+    unfixableErrors: Array<NativeValidationError & { jsonPointer?: string }>;
+  };
   parseAndValidateSql(sqlText: string, schemaJson: string): SqlParsed;
   parseAndValidateMarkdown(
     markdownText: string,
@@ -371,6 +394,36 @@ export interface NativeValidationError extends ValidationError {
   name?: string;
 }
 
+export interface ValidationRepairConfig {
+  coerceTypes?: boolean;
+  useDefaults?: boolean;
+  clampNumbers?: boolean;
+  truncateStrings?: boolean;
+  truncateArrays?: boolean;
+  removeExtraProperties?: boolean;
+  fixEnums?: boolean;
+  fixFormats?: boolean;
+  maxSuggestions?: number;
+}
+
+export interface RepairSuggestion {
+  path: string;
+  errorKind: string;
+  message: string;
+  suggestion: string;
+  originalValue: JsonValue;
+  suggestedValue: JsonValue;
+  autoFixable: boolean;
+}
+
+export interface ValidationRepairResult {
+  valid: boolean;
+  fullyRepaired: boolean;
+  repairedValue: JsonValue;
+  suggestions: RepairSuggestion[];
+  unfixableErrors: ValidationError[];
+}
+
 export interface StreamOutcome<T> {
   done: boolean;
   ok: boolean;
@@ -510,6 +563,33 @@ export function validateAllJsonValue(value: JsonValue, schema: JsonSchema): Vali
   return native
     .validateAllJsonValue(value, JSON.stringify(schema))
     .map((e) => ({ kind: (e as any).kind, message: e.message, path: e.path, jsonPointer: e.jsonPointer }));
+}
+
+export function validateWithRepair(value: JsonValue, schema: JsonSchema, config?: ValidationRepairConfig): ValidationRepairResult {
+  const r = native.validateWithRepair(value, JSON.stringify(schema), config);
+  return {
+    valid: r.valid,
+    fullyRepaired: r.fullyRepaired,
+    repairedValue: r.repairedValue,
+    suggestions: r.suggestions,
+    unfixableErrors: r.unfixableErrors.map((e) => ({ kind: (e as any).kind, message: e.message, path: e.path, jsonPointer: e.jsonPointer })),
+  };
+}
+
+export function parseAndRepair(
+  text: string,
+  schema: JsonSchema,
+  config?: ValidationRepairConfig,
+  parseRepair?: RepairConfig
+): ValidationRepairResult {
+  const r = native.parseAndRepair(text, JSON.stringify(schema), config, parseRepair);
+  return {
+    valid: r.valid,
+    fullyRepaired: r.fullyRepaired,
+    repairedValue: r.repairedValue,
+    suggestions: r.suggestions,
+    unfixableErrors: r.unfixableErrors.map((e) => ({ kind: (e as any).kind, message: e.message, path: e.path, jsonPointer: e.jsonPointer })),
+  };
 }
 
 export function loadsJsonishEx(text: string, repair?: RepairConfig): JsonishParseResult {

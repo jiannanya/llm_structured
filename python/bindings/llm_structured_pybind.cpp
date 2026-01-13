@@ -454,6 +454,77 @@ PYBIND11_MODULE(_native, m) {
     return out;
   });
 
+  // ---- Validation repair suggestions ----
+
+  auto ValidationRepairConfigFromPy = [](py::object obj) -> llm_structured::ValidationRepairConfig {
+    llm_structured::ValidationRepairConfig cfg;
+    if (!obj.is_none()) {
+      py::dict d = obj.cast<py::dict>();
+      if (d.contains("coerce_types")) cfg.coerce_types = d["coerce_types"].cast<bool>();
+      if (d.contains("use_defaults")) cfg.use_defaults = d["use_defaults"].cast<bool>();
+      if (d.contains("clamp_numbers")) cfg.clamp_numbers = d["clamp_numbers"].cast<bool>();
+      if (d.contains("truncate_strings")) cfg.truncate_strings = d["truncate_strings"].cast<bool>();
+      if (d.contains("truncate_arrays")) cfg.truncate_arrays = d["truncate_arrays"].cast<bool>();
+      if (d.contains("remove_extra_properties")) cfg.remove_extra_properties = d["remove_extra_properties"].cast<bool>();
+      if (d.contains("fix_enums")) cfg.fix_enums = d["fix_enums"].cast<bool>();
+      if (d.contains("fix_formats")) cfg.fix_formats = d["fix_formats"].cast<bool>();
+      if (d.contains("max_suggestions")) cfg.max_suggestions = d["max_suggestions"].cast<int>();
+    }
+    return cfg;
+  };
+
+  auto RepairSuggestionToPy = [](const llm_structured::RepairSuggestion& s) {
+    py::dict d;
+    d["path"] = s.path;
+    d["error_kind"] = s.error_kind;
+    d["message"] = s.message;
+    d["suggestion"] = s.suggestion;
+    d["original_value"] = ToPy(s.original_value);
+    d["suggested_value"] = ToPy(s.suggested_value);
+    d["auto_fixable"] = s.auto_fixable;
+    return d;
+  };
+
+  auto ValidationRepairResultToPy = [&](const llm_structured::ValidationRepairResult& r) {
+    py::dict out;
+    out["valid"] = r.valid;
+    out["fully_repaired"] = r.fully_repaired;
+    out["repaired_value"] = ToPy(r.repaired_value);
+    py::list sugg;
+    for (const auto& s : r.suggestions) sugg.append(RepairSuggestionToPy(s));
+    out["suggestions"] = std::move(sugg);
+    py::list errs;
+    for (const auto& e : r.unfixable_errors) errs.append(MakeErrorObject(e));
+    out["unfixable_errors"] = std::move(errs);
+    return out;
+  };
+
+  m.def("validate_with_repair", [ValidationRepairConfigFromPy, ValidationRepairResultToPy](
+                                   py::handle value, py::handle schema, py::object config) {
+    Json v;
+    if (!FromPy(value, v)) throw std::runtime_error("value must be JSON-serializable");
+    Json s = SchemaFromPy(schema);
+    auto cfg = ValidationRepairConfigFromPy(std::move(config));
+    auto r = llm_structured::validate_with_repair(v, s, cfg);
+    return ValidationRepairResultToPy(r);
+  },
+        py::arg("value"),
+        py::arg("schema"),
+        py::arg("config") = py::none());
+
+  m.def("parse_and_repair", [ValidationRepairConfigFromPy, ValidationRepairResultToPy](
+                               const std::string& text, py::handle schema, py::object config, py::object parse_repair) {
+    Json s = SchemaFromPy(schema);
+    auto cfg = ValidationRepairConfigFromPy(std::move(config));
+    RepairConfig pr = RepairConfigFromPy(std::move(parse_repair));
+    auto r = llm_structured::parse_and_repair(text, s, cfg, pr);
+    return ValidationRepairResultToPy(r);
+  },
+        py::arg("text"),
+        py::arg("schema"),
+        py::arg("config") = py::none(),
+        py::arg("parse_repair") = py::none());
+
   m.def("parse_and_validate_json", [](const std::string& text, py::handle schema) {
     Json s = SchemaFromPy(schema);
     return ToPy(llm_structured::parse_and_validate(text, s));

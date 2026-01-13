@@ -378,6 +378,51 @@ def merge_schemas(schema1: Schema, schema2: Schema, config: Mapping[str, Any] | 
     return dict(_native.merge_schemas(schema1, schema2, config))
 
 
+# ============== Validation Repair Suggestions ==============
+
+def validate_with_repair(
+    value: Json,
+    schema: Schema,
+    config: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Validate a value and return repair suggestions / auto-repaired value.
+
+    This does not raise on validation failure. Instead it returns:
+
+    - valid: bool (whether the original value was valid)
+    - fully_repaired: bool (whether all validation issues were auto-fixed)
+    - repaired_value: the value after applying safe automatic repairs
+    - suggestions: list of structured suggestions (each includes path, message, suggestion, etc.)
+    - unfixable_errors: remaining validation errors (same shape as validate_all)
+
+    Config keys (all optional):
+        - coerce_types: bool
+        - use_defaults: bool
+        - clamp_numbers: bool
+        - truncate_strings: bool
+        - truncate_arrays: bool
+        - remove_extra_properties: bool
+        - fix_enums: bool
+        - fix_formats: bool
+        - max_suggestions: int
+    """
+    return dict(_native.validate_with_repair(value, schema, config))
+
+
+def parse_and_repair(
+    text: str,
+    schema: Schema,
+    config: Mapping[str, Any] | None = None,
+    parse_repair: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Parse JSON-ish text, then validate with repair suggestions.
+
+    - parse_repair: RepairConfig-like dict to control JSON-ish parsing repairs.
+    - config: ValidationRepairConfig-like dict to control validation repairs.
+    """
+    return dict(_native.parse_and_repair(text, schema, config, parse_repair))
+
+
 
 __all__ = [
     "Json",
@@ -446,6 +491,8 @@ __all__ = [
     "infer_schema",
     "infer_schema_from_values",
     "merge_schemas",
+    "validate_with_repair",
+    "parse_and_repair",
     "JsonStreamParser",
     "JsonStreamCollector",
     "JsonStreamBatchCollector",

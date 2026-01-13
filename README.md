@@ -211,6 +211,83 @@ schema = infer_schema(toml_value)
 
 **Note:** XML/HTML have a different structure (attributes, mixed content) and cannot be directly mapped to JSON Schema.
 
+### Validation Repair (Repair Suggestions)
+
+When validation fails, you can ask the library to produce:
+
+- a `repaired_value` (best-effort, low-risk auto-fixes)
+- structured repair `suggestions`
+- remaining `unfixable_errors` (if any)
+
+APIs:
+
+- C++: `validate_with_repair`, `parse_and_repair`
+- Python: `validate_with_repair`, `parse_and_repair`
+- TypeScript: `validateWithRepair`, `parseAndRepair`
+
+Common config options (`ValidationRepairConfig`) include:
+
+- `coerce_types`: coerce basic types when safe (e.g. "123" → 123)
+- `use_defaults`: fill missing properties from schema `default` (when available)
+- `clamp_numbers`: clamp numbers into `[minimum, maximum]`
+- `truncate_strings` / `truncate_arrays`: respect `maxLength` / `maxItems`
+- `remove_extra_properties`: drop extra object keys when `additionalProperties: false`
+- `fix_enums`: choose closest enum string (best-effort)
+- `fix_formats`: small format cleanups (best-effort)
+- `max_suggestions`: cap how many suggestions to generate
+
+Python:
+
+```python
+from llm_structured import validate_with_repair
+
+schema = {
+  "type": "object",
+  "required": ["age", "name"],
+  "additionalProperties": False,
+  "properties": {
+    "age": {"type": "integer", "minimum": 0, "maximum": 120},
+    "name": {"type": "string", "minLength": 1},
+  },
+}
+
+value = {"age": "200", "name": "Alice", "extra": 1}
+
+r = validate_with_repair(value, schema, {
+  "coerce_types": True,
+  "clamp_numbers": True,
+  "remove_extra_properties": True,
+  "max_suggestions": 20,
+})
+
+print(r["valid"], r["fully_repaired"], r["repaired_value"])
+```
+
+TypeScript:
+
+```ts
+import { validateWithRepair } from "./src/index";
+
+const schema = {
+  type: "object",
+  required: ["age", "name"],
+  additionalProperties: false,
+  properties: {
+    age: { type: "integer", minimum: 0, maximum: 120 },
+    name: { type: "string", minLength: 1 },
+  },
+} as const;
+
+const r = validateWithRepair({ age: "200", name: "Alice", extra: 1 } as any, schema, {
+  coerceTypes: true,
+  clampNumbers: true,
+  removeExtraProperties: true,
+  maxSuggestions: 20,
+});
+
+console.log(r.valid, r.fullyRepaired, r.repairedValue);
+```
+
 ### Cross-language consistency + CLI
 
 - C++17 core library shared by the Python (pybind11) and TypeScript (Node-API) bindings

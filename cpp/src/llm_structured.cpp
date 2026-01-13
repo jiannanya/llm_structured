@@ -4,6 +4,8 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
+#include <limits>
 #include <set>
 #include <regex>
 #include <sstream>
@@ -1688,6 +1690,552 @@ std::vector<ValidationError> validate_all(const Json& value, const Json& schema,
   opt.errors = &errors;
   validate_impl(value, schema, path, opt);
   return errors;
+}
+
+static void apply_defaults(Json& value, const Json& schema);
+
+namespace {
+
+static std::string trim_copy_ws(const std::string& s) {
+  size_t start = 0;
+  while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) start++;
+  size_t end = s.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) end--;
+  return s.substr(start, end - start);
+}
+
+static size_t levenshtein_distance(const std::string& a, const std::string& b) {
+  if (a == b) return 0;
+  if (a.empty()) return b.size();
+  if (b.empty()) return a.size();
+
+  std::vector<size_t> prev(b.size() + 1), cur(b.size() + 1);
+  for (size_t j = 0; j <= b.size(); ++j) prev[j] = j;
+  for (size_t i = 1; i <= a.size(); ++i) {
+    cur[0] = i;
+    for (size_t j = 1; j <= b.size(); ++j) {
+      const size_t cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+      cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost});
+    }
+    prev.swap(cur);
+  }
+  return prev[b.size()];
+}
+
+static std::optional<std::string> get_type_string(const Json& schema) {
+  if (!schema.is_object()) return std::nullopt;
+  const auto& sch = schema.as_object();
+  auto it = sch.find("type");
+  if (it == sch.end() || !it->second.is_string()) return std::nullopt;
+  return to_lower(it->second.as_string());
+}
+
+static void push_suggestion(std::vector<RepairSuggestion>& out,
+                            const std::string& path,
+                            const std::string& kind,
+                            const std::string& message,
+                            const std::string& suggestion,
+                            const Json& original_value,
+                            const Json& suggested_value,
+                            bool auto_fixable) {
+  RepairSuggestion s;
+  s.path = path;
+  s.error_kind = kind;
+  s.message = message;
+  s.suggestion = suggestion;
+  s.original_value = original_value;
+  s.suggested_value = suggested_value;
+  s.auto_fixable = auto_fixable;
+  out.push_back(std::move(s));
+}
+
+static bool try_parse_jsonish_string(const std::string& s, Json& out) {
+  try {
+    out = loads_jsonish(s);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+static bool repair_impl(Json& value,
+                        const Json& schema,
+                        const std::string& path,
+                        const ValidationRepairConfig& config,
+                        std::vector<RepairSuggestion>& suggestions,
+                        int& budget);
+
+static bool repair_against_anyof(Json& value,
+                                 const Json& schema,
+                                 const std::string& path,
+                                 const ValidationRepairConfig& config,
+                                 std::vector<RepairSuggestion>& suggestions,
+                                 int& budget) {
+  if (!schema.is_object()) return false;
+  const auto& sch = schema.as_object();
+  auto it = sch.find("anyOf");
+  if (it == sch.end() || !it->second.is_array()) return false;
+  const auto& any_of = it->second.as_array();
+  if (any_of.empty()) return false;
+
+  for (const auto& branch : any_of) {
+    if (schema_passes(value, branch, path)) return false;
+  }
+
+  size_t best_errs = std::numeric_limits<size_t>::max();
+  std::optional<Json> best_value;
+  std::vector<RepairSuggestion> best_suggestions;
+  int best_budget = budget;
+
+  for (const auto& branch : any_of) {
+    Json candidate = value;
+    std::vector<RepairSuggestion> local_suggestions;
+    int local_budget = budget;
+    repair_impl(candidate, branch, path, config, local_suggestions, local_budget);
+    auto errs = validate_all(candidate, branch, path);
+    if (errs.size() < best_errs) {
+      best_errs = errs.size();
+      best_value = candidate;
+      best_suggestions = std::move(local_suggestions);
+      best_budget = local_budget;
+      if (best_errs == 0) break;
+    }
+  }
+
+  if (!best_value) return false;
+  value = *best_value;
+  suggestions.insert(suggestions.end(), best_suggestions.begin(), best_suggestions.end());
+  budget = best_budget;
+  return true;
+}
+
+static bool repair_scalar_type(Json& value,
+                               const Json& schema,
+                               const std::string& path,
+                               const ValidationRepairConfig& config,
+                               std::vector<RepairSuggestion>& suggestions,
+                               int& budget) {
+  if (budget <= 0) return false;
+  auto ty = get_type_string(schema);
+  if (!ty) return false;
+
+  // string -> parsed JSON value
+  if (config.coerce_types && value.is_string() && (*ty == "object" || *ty == "array")) {
+    const std::string trimmed = trim_copy_ws(value.as_string());
+    if (!trimmed.empty() && ((trimmed.front() == '{' && trimmed.back() == '}') || (trimmed.front() == '[' && trimmed.back() == ']'))) {
+      Json parsed;
+      if (try_parse_jsonish_string(trimmed, parsed)) {
+        if ((*ty == "object" && parsed.is_object()) || (*ty == "array" && parsed.is_array())) {
+          push_suggestion(suggestions,
+                          path,
+                          "type",
+                          "value is a string but schema expects " + *ty,
+                          "parse the string as JSON and use the parsed " + *ty,
+                          value,
+                          parsed,
+                          true);
+          value = parsed;
+          --budget;
+          return true;
+        }
+      }
+    }
+  }
+
+  if (!config.coerce_types) return false;
+
+  if (*ty == "boolean") {
+    if (value.is_string()) {
+      std::string s = to_lower(trim_copy_ws(value.as_string()));
+      if (s == "true" || s == "false") {
+        Json repaired(s == "true");
+        push_suggestion(suggestions, path, "type", "expected boolean", "coerce string to boolean", value, repaired, true);
+        value = repaired;
+        --budget;
+        return true;
+      }
+    }
+  }
+
+  if (*ty == "number" || *ty == "integer") {
+    if (value.is_string()) {
+      const std::string s = trim_copy_ws(value.as_string());
+      char* end = nullptr;
+      double n = std::strtod(s.c_str(), &end);
+      if (end != s.c_str() && end != nullptr) {
+        while (*end && std::isspace(static_cast<unsigned char>(*end))) ++end;
+        if (*end == '\0' && std::isfinite(n)) {
+          Json repaired(n);
+          push_suggestion(suggestions, path, "type", "expected number", "coerce numeric string to number", value, repaired, true);
+          value = repaired;
+          --budget;
+          return true;
+        }
+      }
+    }
+    if (*ty == "integer" && value.is_number()) {
+      double n = value.as_number();
+      double ip;
+      double frac = std::modf(n, &ip);
+      if (std::fabs(frac) > 1e-12) {
+        double rounded = std::round(n);
+        if (std::fabs(n - rounded) < 1e-9) {
+          Json repaired(rounded);
+          push_suggestion(suggestions, path, "type", "expected integer", "round to nearest integer", value, repaired, true);
+          value = repaired;
+          --budget;
+          return true;
+        }
+      }
+    }
+  }
+
+  if (*ty == "string") {
+    if (value.is_number()) {
+      Json repaired(dumps_json(value));
+      push_suggestion(suggestions, path, "type", "expected string", "convert number to string", value, repaired, true);
+      value = repaired;
+      --budget;
+      return true;
+    }
+    if (value.is_bool()) {
+      Json repaired(value.as_bool() ? "true" : "false");
+      push_suggestion(suggestions, path, "type", "expected string", "convert boolean to string", value, repaired, true);
+      value = repaired;
+      --budget;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static bool repair_enum(Json& value,
+                        const Json& schema,
+                        const std::string& path,
+                        const ValidationRepairConfig& config,
+                        std::vector<RepairSuggestion>& suggestions,
+                        int& budget) {
+  if (budget <= 0) return false;
+  if (!config.fix_enums) return false;
+  if (!schema.is_object()) return false;
+  const auto& sch = schema.as_object();
+  auto it = sch.find("enum");
+  if (it == sch.end() || !it->second.is_array()) return false;
+  const auto& arr = it->second.as_array();
+
+  for (const auto& v : arr) {
+    if (json_equals(value, v)) return false;
+  }
+
+  if (!value.is_string()) return false;
+
+  std::optional<std::string> best;
+  size_t best_d = std::numeric_limits<size_t>::max();
+  for (const auto& e : arr) {
+    if (!e.is_string()) continue;
+    const auto& cand = e.as_string();
+    size_t d = levenshtein_distance(to_lower(value.as_string()), to_lower(cand));
+    if (d < best_d) {
+      best_d = d;
+      best = cand;
+    }
+  }
+  if (!best) return false;
+
+  if (best_d > 3 && value.as_string().size() > 3) {
+    push_suggestion(suggestions,
+                    path,
+                    "enum",
+                    "value not in enum",
+                    "choose one of the allowed enum values",
+                    value,
+                    Json(nullptr),
+                    false);
+    --budget;
+    return false;
+  }
+
+  Json repaired(*best);
+  push_suggestion(suggestions,
+                  path,
+                  "enum",
+                  "value not in enum",
+                  "use closest enum value: " + *best,
+                  value,
+                  repaired,
+                  true);
+  value = repaired;
+  --budget;
+  return true;
+}
+
+static bool repair_numeric_bounds(Json& value,
+                                  const Json& schema,
+                                  const std::string& path,
+                                  const ValidationRepairConfig& config,
+                                  std::vector<RepairSuggestion>& suggestions,
+                                  int& budget) {
+  if (budget <= 0) return false;
+  if (!config.clamp_numbers) return false;
+  if (!value.is_number() || !schema.is_object()) return false;
+  const auto& sch = schema.as_object();
+
+  auto mn = get_number_field(sch, "minimum");
+  auto mx = get_number_field(sch, "maximum");
+  if (!mn && !mx) return false;
+
+  double n = value.as_number();
+  double clamped = n;
+  if (mn) clamped = std::max(clamped, *mn);
+  if (mx) clamped = std::min(clamped, *mx);
+  if (clamped == n) return false;
+
+  Json repaired(clamped);
+  push_suggestion(suggestions, path, "range", "number out of bounds", "clamp number into [minimum, maximum]", value, repaired, true);
+  value = repaired;
+  --budget;
+  return true;
+}
+
+static bool repair_string_lengths(Json& value,
+                                  const Json& schema,
+                                  const std::string& path,
+                                  const ValidationRepairConfig& config,
+                                  std::vector<RepairSuggestion>& suggestions,
+                                  int& budget) {
+  if (budget <= 0) return false;
+  if (!config.truncate_strings) return false;
+  if (!value.is_string() || !schema.is_object()) return false;
+  const auto& sch = schema.as_object();
+  auto mx = get_number_field(sch, "maxLength");
+  if (!mx || *mx < 0.0) return false;
+  const size_t max_len = static_cast<size_t>(*mx);
+  if (value.as_string().size() <= max_len) return false;
+
+  Json repaired(value.as_string().substr(0, max_len));
+  push_suggestion(suggestions, path, "length", "string exceeds maxLength", "truncate string to maxLength", value, repaired, true);
+  value = repaired;
+  --budget;
+  return true;
+}
+
+static bool repair_array_lengths(Json& value,
+                                 const Json& schema,
+                                 const std::string& path,
+                                 const ValidationRepairConfig& config,
+                                 std::vector<RepairSuggestion>& suggestions,
+                                 int& budget) {
+  if (budget <= 0) return false;
+  if (!config.truncate_arrays) return false;
+  if (!value.is_array() || !schema.is_object()) return false;
+  const auto& sch = schema.as_object();
+  auto mx = get_number_field(sch, "maxItems");
+  if (!mx || *mx < 0.0) return false;
+  const size_t max_items = static_cast<size_t>(*mx);
+  auto& arr = value.as_array();
+  if (arr.size() <= max_items) return false;
+
+  Json before = value;
+  arr.resize(max_items);
+  push_suggestion(suggestions, path, "length", "array exceeds maxItems", "truncate array to maxItems", before, value, true);
+  --budget;
+  return true;
+}
+
+static bool repair_object_structure(Json& value,
+                                    const Json& schema,
+                                    const std::string& path,
+                                    const ValidationRepairConfig& config,
+                                    std::vector<RepairSuggestion>& suggestions,
+                                    int& budget) {
+  if (budget <= 0) return false;
+  if (!value.is_object() || !schema.is_object()) return false;
+  const auto& sch = schema.as_object();
+  auto& obj = value.as_object();
+  bool changed = false;
+
+  if (config.use_defaults) {
+    Json before = value;
+    apply_defaults(value, schema);
+    if (!json_equals(before, value)) {
+      push_suggestion(suggestions,
+                      path,
+                      "required",
+                      "missing required properties",
+                      "fill missing properties with schema defaults (when available)",
+                      before,
+                      value,
+                      true);
+      --budget;
+      changed = true;
+    }
+  }
+
+  auto it_req = sch.find("required");
+  if (it_req != sch.end() && it_req->second.is_array()) {
+    for (const auto& k : it_req->second.as_array()) {
+      if (budget <= 0) break;
+      if (!k.is_string()) continue;
+      const std::string& key = k.as_string();
+      if (obj.find(key) != obj.end()) continue;
+      push_suggestion(suggestions,
+                      path + "." + key,
+                      "required",
+                      "missing required property",
+                      "add the missing required property",
+                      Json(nullptr),
+                      Json(nullptr),
+                      false);
+      --budget;
+    }
+  }
+
+  if (config.remove_extra_properties) {
+    bool forbid = false;
+    auto it_ap = sch.find("additionalProperties");
+    if (it_ap != sch.end() && it_ap->second.is_bool() && !it_ap->second.as_bool()) forbid = true;
+    if (forbid) {
+      const JsonObject* props = nullptr;
+      auto it_props = sch.find("properties");
+      if (it_props != sch.end() && it_props->second.is_object()) props = &it_props->second.as_object();
+      if (props) {
+        std::vector<std::string> to_remove;
+        for (const auto& kv : obj) {
+          if (props->find(kv.first) == props->end()) to_remove.push_back(kv.first);
+        }
+        if (!to_remove.empty()) {
+          Json before = value;
+          for (const auto& k : to_remove) obj.erase(k);
+          push_suggestion(suggestions,
+                          path,
+                          "extra",
+                          "additionalProperties forbidden",
+                          "remove properties not present in schema properties",
+                          before,
+                          value,
+                          true);
+          --budget;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  auto it_props = sch.find("properties");
+  if (it_props != sch.end() && it_props->second.is_object()) {
+    const auto& props = it_props->second.as_object();
+    for (const auto& kv : props) {
+      if (budget <= 0) break;
+      auto itv = obj.find(kv.first);
+      if (itv == obj.end()) continue;
+      changed = repair_impl(itv->second, kv.second, path + "." + kv.first, config, suggestions, budget) || changed;
+    }
+  }
+
+  return changed;
+}
+
+static bool repair_array_items(Json& value,
+                               const Json& schema,
+                               const std::string& path,
+                               const ValidationRepairConfig& config,
+                               std::vector<RepairSuggestion>& suggestions,
+                               int& budget) {
+  if (!value.is_array() || !schema.is_object()) return false;
+  const auto& sch = schema.as_object();
+  auto it_items = sch.find("items");
+  if (it_items == sch.end() || !it_items->second.is_object()) return false;
+  auto& arr = value.as_array();
+  bool changed = false;
+  for (size_t i = 0; i < arr.size() && budget > 0; ++i) {
+    changed = repair_impl(arr[i], it_items->second, path + "[" + std::to_string(i) + "]", config, suggestions, budget) || changed;
+  }
+  return changed;
+}
+
+static bool repair_impl(Json& value,
+                        const Json& schema,
+                        const std::string& path,
+                        const ValidationRepairConfig& config,
+                        std::vector<RepairSuggestion>& suggestions,
+                        int& budget) {
+  if (budget <= 0) return false;
+  if (!schema.is_object()) return false;
+
+  bool changed = false;
+
+  changed = repair_against_anyof(value, schema, path, config, suggestions, budget) || changed;
+  changed = repair_scalar_type(value, schema, path, config, suggestions, budget) || changed;
+  changed = repair_enum(value, schema, path, config, suggestions, budget) || changed;
+
+  auto ty = get_type_string(schema);
+  if (ty && *ty == "object") {
+    changed = repair_object_structure(value, schema, path, config, suggestions, budget) || changed;
+  } else if (ty && *ty == "array") {
+    changed = repair_array_items(value, schema, path, config, suggestions, budget) || changed;
+    changed = repair_array_lengths(value, schema, path, config, suggestions, budget) || changed;
+  } else if (ty && (*ty == "number" || *ty == "integer")) {
+    changed = repair_numeric_bounds(value, schema, path, config, suggestions, budget) || changed;
+  } else if (ty && *ty == "string") {
+    changed = repair_string_lengths(value, schema, path, config, suggestions, budget) || changed;
+    if (config.fix_formats && value.is_string()) {
+      const auto& sch = schema.as_object();
+      auto it_fmt = sch.find("format");
+      if (it_fmt != sch.end() && it_fmt->second.is_string()) {
+        std::string trimmed = trim_copy_ws(value.as_string());
+        if (trimmed != value.as_string()) {
+          Json repaired(trimmed);
+          push_suggestion(suggestions,
+                          path,
+                          "format",
+                          "string may violate format: " + it_fmt->second.as_string(),
+                          "trim leading/trailing whitespace",
+                          value,
+                          repaired,
+                          true);
+          value = repaired;
+          --budget;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return changed;
+}
+
+}  // namespace
+
+ValidationRepairResult validate_with_repair(const Json& value, const Json& schema, const ValidationRepairConfig& config) {
+  ValidationRepairResult out;
+  out.valid = false;
+  out.fully_repaired = false;
+  out.repaired_value = value;
+
+  auto initial_errors = validate_all(value, schema, "$");
+  if (initial_errors.empty()) {
+    out.valid = true;
+    out.fully_repaired = true;
+    out.unfixable_errors.clear();
+    return out;
+  }
+
+  int budget = std::max(0, config.max_suggestions);
+  repair_impl(out.repaired_value, schema, "$", config, out.suggestions, budget);
+
+  auto remaining = validate_all(out.repaired_value, schema, "$");
+  out.unfixable_errors = remaining;
+  out.fully_repaired = remaining.empty();
+  return out;
+}
+
+ValidationRepairResult parse_and_repair(const std::string& text,
+                                       const Json& schema,
+                                       const ValidationRepairConfig& config,
+                                       const RepairConfig& parse_repair) {
+  auto parsed = loads_jsonish_ex(text, parse_repair);
+  return validate_with_repair(parsed.value, schema, config);
 }
 
 static void apply_defaults(Json& value, const Json& schema) {

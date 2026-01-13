@@ -159,6 +159,54 @@ JsonishParseResult parse_and_validate_with_defaults_ex(const std::string& text, 
 
 std::string dumps_json(const Json& value);
 
+// ---------------- Validation Repair Suggestions ----------------
+
+// Represents a single repair suggestion for a validation error
+struct RepairSuggestion {
+  std::string path;           // JSONPath where the error occurred
+  std::string error_kind;     // Type of error: type | required | enum | range | length | format | extra
+  std::string message;        // Human-readable description of the problem
+  std::string suggestion;     // Human-readable suggestion for fixing
+  Json original_value;        // The original value that failed validation
+  Json suggested_value;       // The suggested repaired value (may be null if no auto-fix possible)
+  bool auto_fixable{false};   // Whether this can be automatically fixed
+};
+
+// Configuration for validation repair behavior
+struct ValidationRepairConfig {
+  bool coerce_types{true};           // Convert "123" to 123, "true" to true, etc.
+  bool use_defaults{true};           // Fill missing required fields with schema defaults
+  bool clamp_numbers{true};          // Clamp numbers to min/max bounds
+  bool truncate_strings{false};      // Truncate strings exceeding maxLength
+  bool truncate_arrays{false};       // Truncate arrays exceeding maxItems
+  bool remove_extra_properties{true}; // Remove properties not in schema (when additionalProperties=false)
+  bool fix_enums{true};              // Suggest closest enum value (Levenshtein distance)
+  bool fix_formats{true};            // Attempt to fix string formats (dates, emails, etc.)
+  int max_suggestions{50};           // Maximum number of suggestions to return
+};
+
+// Result of validation with repair suggestions
+struct ValidationRepairResult {
+  bool valid{false};                      // Whether original value was valid
+  Json repaired_value;                    // The repaired value (original if valid, repaired if fixable)
+  std::vector<RepairSuggestion> suggestions; // List of repair suggestions
+  std::vector<ValidationError> unfixable_errors; // Errors that couldn't be auto-fixed
+  bool fully_repaired{false};             // Whether all errors were auto-fixed
+};
+
+// Validate and return repair suggestions for any errors
+ValidationRepairResult validate_with_repair(
+    const Json& value, 
+    const Json& schema, 
+    const ValidationRepairConfig& config = ValidationRepairConfig{});
+
+// Parse, validate, and repair in one step
+ValidationRepairResult parse_and_repair(
+    const std::string& text, 
+    const Json& schema,
+    const ValidationRepairConfig& config = ValidationRepairConfig{},
+    const RepairConfig& parse_repair = RepairConfig{});
+
 // ---------------- Markdown ----------------
 
 struct MarkdownHeading {

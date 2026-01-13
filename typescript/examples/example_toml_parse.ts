@@ -15,6 +15,7 @@ import {
   extractTomlCandidate,
   parseAndValidateToml,
   dumpsToml,
+  JsonSchema,
   JsonValue,
 } from "../src/index";
 
@@ -45,7 +46,7 @@ port = 8080
 name = "myapp"
 max_connections = 100
 `;
-  const schema = {
+  const schema: JsonSchema = {
     type: "object",
     properties: {
       server: {
